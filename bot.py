@@ -39,15 +39,36 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"PDF сохранен. Ссылка/ID для поста: `{file_id}`", parse_mode="Markdown")
 
 
+def _looks_like_encar_or_id(text: str) -> bool:
+    """Сообщение похоже на ссылку Encar или ID машины."""
+    if not text:
+        return False
+    t = text.strip().lower()
+    if "encar" in t or "carid=" in t:
+        return True
+    if t.isdigit() and len(t) >= 6:
+        return True
+    return False
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    text = (update.message.text or "").strip()
+
     if user_id != ADMIN_ID:
+        if _looks_like_encar_or_id(text):
+            await update.message.reply_text(
+                "Запрашивать отчёты по ссылке или ID может только администратор."
+            )
         return
 
-    text = (update.message.text or "").strip()
     carid = extract_carid(text)
     if not carid:
-        return  # не ID и не ссылка — игнорируем
+        if _looks_like_encar_or_id(text):
+            await update.message.reply_text(
+                "Не удалось извлечь ID машины из ссылки. Проверь, что в ссылке есть carid=ЧИСЛО или путь вида .../detail/ЧИСЛО."
+            )
+        return
 
     status = await update.message.reply_text(
         f"Запрашиваю отчёт Encar для carid={carid}, перевожу на русский…"

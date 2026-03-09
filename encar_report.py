@@ -10,8 +10,9 @@ from pathlib import Path
 
 REPORT_URL = "https://www.encar.com/md/sl/mdsl_regcar.do?carid={carid}&method=inspectionViewNew"
 
-# Паттерны для извлечения carid
+# Паттерны для извлечения carid (query carid=... или путь /detail/123/)
 CARID_PATTERN = re.compile(r"carid=(\d+)", re.I)
+CARID_PATH_PATTERN = re.compile(r"encar\.com[^/]*/.*?/(?:detail/)?(\d{6,})(?:\?|/|$)", re.I)
 CARID_ONLY_PATTERN = re.compile(r"^\s*(\d{6,})\s*$")  # только цифры, минимум 6
 
 # Корейские символы (Хангул) — переводим только такой текст
@@ -93,14 +94,22 @@ def _translate_html(html: str, base_url: str = "https://www.encar.com") -> str:
 
 def extract_carid(text: str) -> str | None:
     """
-    Извлекает carid из текста: ссылка Encar или просто ID (число).
+    Извлекает carid из текста: ссылка Encar (fem.encar.com, www.encar.com и т.д.) или просто ID (число).
     Возвращает строку с ID или None.
     """
     if not text or not text.strip():
         return None
     text = text.strip()
-    # Ссылка encar с carid=
-    if "encar" in text.lower() or "carid=" in text.lower():
+    # Ссылка encar: сначала carid= в query, иначе ID из пути (/detail/123 или /cars/detail/123)
+    if "encar" in text.lower():
+        m = CARID_PATTERN.search(text)
+        if m:
+            return m.group(1)
+        m = CARID_PATH_PATTERN.search(text)
+        if m:
+            return m.group(1)
+        return None
+    if "carid=" in text.lower():
         m = CARID_PATTERN.search(text)
         return m.group(1) if m else None
     # Только число (ID)
