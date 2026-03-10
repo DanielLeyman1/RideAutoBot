@@ -1,4 +1,6 @@
+# Нужен Python 3.11 или 3.12 (3.14 ломает httpcore/httpx)
 python-telegram-bot>=20.7
 playwright>=1.40.0
 beautifulsoup4>=4.12.0
 deep-translator>=1.11.0
+Jinja2>=3.1.0

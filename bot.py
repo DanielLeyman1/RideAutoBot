@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
+import logging
 import os
+import time
 import uuid
 from pathlib import Path
 from telegram import Update
@@ -12,12 +14,33 @@ ADMIN_ID = 377261863  # твой Telegram ID
 STORAGE_DIR = Path("pdf_storage")
 STORAGE_DIR.mkdir(exist_ok=True)
 
+# Лог в консоль, чтобы видеть входящие сообщения
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.INFO,
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 # ===== Команды =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Можешь:\n"
         "• Отправить PDF — сохраню и дам ID для поста.\n"
-        "• Написать ID машины или ссылку Encar — скачаю отчёт, переведу на русский, соберу PDF и дам ссылку."
+        "• Написать ID машины или ссылку Encar — скачаю отчёт, переведу на русский, соберу PDF и дам ссылку.\n"
+        "• Написать /myid — покажу твой Telegram ID (для проверки админа)."
+    )
+
+
+async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка: твой ID и совпадает ли с админом."""
+    user_id = update.message.from_user.id
+    is_admin = user_id == ADMIN_ID
+    await update.message.reply_text(
+        f"Твой Telegram ID: `{user_id}`\n"
+        f"ADMIN_ID в боте: `{ADMIN_ID}`\n"
+        f"Ты админ: {'да' if is_admin else 'нет'}",
+        parse_mode="Markdown",
     )
 
 
@@ -55,6 +78,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = (update.message.text or "").strip()
 
+    carid_extracted = extract_carid(text)
+    # В консоли видно каждое входящее сообщение (для отладки)
+    print(f"[{time.strftime('%H:%M:%S')}] [Текст] user_id={user_id} len={len(text)} carid={carid_extracted}", flush=True)
+    logger.info("Текст от %s, carid=%s", user_id, carid_extracted)
+
     if user_id != ADMIN_ID:
         if _looks_like_encar_or_id(text):
             await update.message.reply_text(
@@ -62,7 +90,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    carid = extract_carid(text)
+    carid = carid_extracted
     if not carid:
         if _looks_like_encar_or_id(text):
             await update.message.reply_text(
@@ -71,12 +99,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     status = await update.message.reply_text(
-        f"Запрашиваю отчёт Encar для carid={carid}, перевожу на русский…"
+        f"Запрашиваю отчёт Encar для carid={carid}…"
     )
+
+    async def report_status(msg: str):
+        try:
+            await status.edit_text(f"{msg}\n\ncarid={carid}")
+        except Exception:
+            pass
+
     try:
         file_id = str(uuid.uuid4())
         file_path = STORAGE_DIR / f"{file_id}.pdf"
-        ok = await fetch_report_pdf(carid, file_path)
+        print(f"[{time.strftime('%H:%M:%S')}] [BOT] вызов fetch_report_pdf carid={carid}", flush=True)
+        ok = await fetch_report_pdf(carid, file_path, on_status=report_status)
+        print(f"[{time.strftime('%H:%M:%S')}] [BOT] fetch_report_pdf вернул ok={ok}", flush=True)
         if not ok:
             await status.edit_text("Не удалось сформировать PDF (страница не открылась или нет отчёта).")
             return
@@ -93,18 +130,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ===== Запуск бота =====
-async def main():
-    TOKEN = "8596627705:AAFHUS6_b3jqhBm1NyLGsEARFhxHL0PJ4Go"
+def main():
+    TOKEN = "8725470238:AAGiXoMb0ETxMRUwwuuIDyludQtKASBN97c"  # тестовый бот
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("Бот запущен…")
-    await app.run_polling()
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
