@@ -4,9 +4,39 @@
 Загрузка страницы → перевод текста на русский → сборка PDF.
 """
 import asyncio
+import json
+import os
 import re
 import time
 from pathlib import Path
+
+# #region agent log
+def _debug_log(location: str, message: str, data: dict | None = None, hypothesis_id: str = ""):
+    try:
+        log_path = Path(__file__).resolve().parent.parent / "debug-29cbeb.log"
+        payload = {"sessionId": "29cbeb", "location": location, "message": message, "timestamp": int(time.time() * 1000)}
+        if data:
+            payload["data"] = data
+        if hypothesis_id:
+            payload["hypothesisId"] = hypothesis_id
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+# #endregion
+
+# Прокси для доступа к Encar (Корея). Выключить: REPORT_PROXY=0
+def _report_proxy():
+    if os.environ.get("REPORT_PROXY", "1") == "0":
+        return None
+    server = os.environ.get("REPORT_PROXY_SERVER", "http://geo.floppydata.com:10080")
+    if not server.startswith("http"):
+        server = "http://" + server
+    return {
+        "server": server,
+        "username": os.environ.get("REPORT_PROXY_USER", "UciwZyfTPlvUn4OS"),
+        "password": os.environ.get("REPORT_PROXY_PASSWORD", "FDsAIHONGvLKdUlN"),
+    }
 
 
 def _log(msg: str) -> None:
@@ -47,6 +77,17 @@ def _translate_chunk_sync(chunk: str) -> list[str]:
         return tr.split(SEP)
     except Exception:
         return chunk.split(SEP)
+
+
+def _translate_ko_ru_sync(text: str) -> str:
+    """Один запрос корейский → русский для самообучения маппинга."""
+    if not text or not text.strip():
+        return text
+    try:
+        from deep_translator import GoogleTranslator
+        return GoogleTranslator(source="ko", target="ru").translate(text.strip()) or text
+    except Exception:
+        return text
 
 
 async def _translate_texts_async(texts: list[str]) -> list[str]:
@@ -253,24 +294,205 @@ def extract_carid(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _render_report_template(data_ru: dict) -> str:
-    """Рендерит HTML отчёта из шаблона и данных (маппинг уже применён)."""
+# Имена файлов логотипа и схем для диагностики и подстановки
+LOGO_NAMES = ("logo.png", "logo.svg")
+DIAGRAM_OUTER_NAMES = ("diagram_outer.png", "diagram_outer.png.png")
+DIAGRAM_INNER_NAMES = ("diagram_inner.png", "diagram_inner.png.png")
+
+
+def run_report_diagnostics(base_dir: Path | None) -> dict:
+    """
+    Самодиагностика: ищет папку templates/images и проверяет наличие логотипа и схем.
+    Возвращает: images_dir (Path или None), template_dir, found { logo, diagram_outer, diagram_inner }, log_lines.
+    """
+    script_dir = Path(__file__).resolve().parent
+    cwd = Path.cwd()
+    candidates = [
+        ("base_dir", base_dir),
+        ("script_dir", script_dir),
+        ("cwd", cwd),
+        ("cwd/encar_bot_ride_car", cwd / "encar_bot_ride_car"),
+    ]
+    log_lines = []
+    for label, base in candidates:
+        if base is None or not base:
+            continue
+        template_dir = base / "templates"
+        images_dir = template_dir / "images"
+        if not template_dir.exists():
+            continue
+        if not images_dir.exists():
+            log_lines.append(f"DIAG: {label} -> {images_dir} (images не найдена)")
+            continue
+        logo_path = None
+        for n in LOGO_NAMES:
+            p = images_dir / n
+            if p.exists():
+                logo_path = p
+                break
+        outer_path = None
+        for n in DIAGRAM_OUTER_NAMES:
+            p = images_dir / n
+            if p.exists():
+                outer_path = p
+                break
+        inner_path = None
+        for n in DIAGRAM_INNER_NAMES:
+            p = images_dir / n
+            if p.exists():
+                inner_path = p
+                break
+        log_lines.append(f"DIAG: {label} -> {images_dir.resolve()}")
+        log_lines.append(f"  logo: {'да (' + logo_path.name + ')' if logo_path else 'нет'}")
+        log_lines.append(f"  diagram_outer: {'да (' + outer_path.name + ')' if outer_path else 'нет'}")
+        log_lines.append(f"  diagram_inner: {'да (' + inner_path.name + ')' if inner_path else 'нет'}")
+        return {
+            "template_dir": template_dir,
+            "images_dir": images_dir,
+            "logo_path": logo_path,
+            "diagram_outer_path": outer_path,
+            "diagram_inner_path": inner_path,
+            "log_lines": log_lines,
+        }
+    log_lines.append("DIAG: ни одна папка templates/images не найдена")
+    return {"template_dir": script_dir / "templates", "images_dir": None, "logo_path": None, "diagram_outer_path": None, "diagram_inner_path": None, "log_lines": log_lines}
+
+
+def _get_template_dirs(base_dir: Path | None):
+    diag = run_report_diagnostics(base_dir)
+    template_dir = diag["template_dir"]
+    images_dir = diag["images_dir"]
+    if images_dir is None:
+        script_dir = Path(__file__).resolve().parent
+        template_dir = script_dir / "templates"
+        images_dir = template_dir / "images"
+    return template_dir, images_dir
+
+
+def _render_report_template(data_ru: dict, base_dir: Path | None = None, use_file_url: bool = False, diag: dict | None = None) -> str:
+    """Рендерит HTML отчёта. diag — результат run_report_diagnostics, если передан — используем найденные пути к картинкам."""
+    import os
     from jinja2 import Environment, FileSystemLoader
-    template_dir = Path(__file__).resolve().parent / "templates"
+    if diag is None:
+        diag = run_report_diagnostics(base_dir)
+    template_dir = diag["template_dir"]
+    images_dir = diag["images_dir"] or (template_dir / "images")
+    for line in diag.get("log_lines", []):
+        _log(line)
+
+    if "company_name" not in data_ru:
+        data_ru["company_name"] = os.environ.get("REPORT_COMPANY_NAME", "World Ride Auto")
+
+    logo_path = diag.get("logo_path")
+    outer_path = diag.get("diagram_outer_path")
+    inner_path = diag.get("diagram_inner_path")
+
+    if use_file_url:
+        if "logo_src" not in data_ru and logo_path:
+            data_ru["logo_src"] = f"images/{logo_path.name}"
+            _log(f"REPORT: логотип (file): {data_ru['logo_src']}")
+        if "diagram_outer_src" not in data_ru and outer_path:
+            data_ru["diagram_outer_src"] = f"images/{outer_path.name}"
+        if "diagram_inner_src" not in data_ru and inner_path:
+            data_ru["diagram_inner_src"] = f"images/{inner_path.name}"
+    else:
+        import base64
+        def _embed_resized(path: Path | None, mime: str, max_size: int = 520) -> str | None:
+            if path is None or not path.exists():
+                return None
+            try:
+                raw = path.read_bytes()
+                if mime == "image/svg+xml":
+                    b64 = base64.b64encode(raw).decode("ascii")
+                    return f"data:{mime};base64,{b64}"
+                try:
+                    from PIL import Image
+                    import io
+                    img = Image.open(io.BytesIO(raw))
+                    if img.mode in ("RGBA", "P"):
+                        img = img.convert("RGBA")
+                    else:
+                        img = img.convert("RGB")
+                    w, h = img.size
+                    if w > max_size or h > max_size:
+                        try:
+                            resample = Image.Resampling.LANCZOS
+                        except AttributeError:
+                            resample = getattr(Image, "LANCZOS", 1)
+                        if w > h:
+                            img = img.resize((max_size, int(h * max_size / w)), resample)
+                        else:
+                            img = img.resize((int(w * max_size / h), max_size), resample)
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG", optimize=True)
+                    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                    return f"data:image/png;base64,{b64}"
+                except Exception:
+                    b64 = base64.b64encode(raw).decode("ascii")
+                    return f"data:{mime};base64,{b64}"
+            except Exception:
+                return None
+        if "logo_src" not in data_ru:
+            if logo_path:
+                mime = "image/svg+xml" if logo_path.suffix.lower() == ".svg" else "image/png"
+                src = _embed_resized(logo_path, mime, max_size=160)
+                if src:
+                    data_ru["logo_src"] = src
+                    _log(f"REPORT: логотип встроен ({logo_path.name})")
+            if "logo_src" not in data_ru:
+                _log("REPORT: логотип не найден")
+        if "diagram_outer_src" not in data_ru and outer_path:
+            src = _embed_resized(outer_path, "image/png", max_size=520)
+            if src:
+                data_ru["diagram_outer_src"] = src
+                _log(f"REPORT: схема встроена ({outer_path.name})")
+        if "diagram_inner_src" not in data_ru and inner_path:
+            src = _embed_resized(inner_path, "image/png", max_size=520)
+            if src:
+                data_ru["diagram_inner_src"] = src
+                _log(f"REPORT: схема встроена ({inner_path.name})")
+
     env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=True)
     template = env.get_template("report_ru.html")
     return template.render(**data_ru)
+
+
+async def _learn_missing_after_report(missing: dict) -> None:
+    """Фоновая задача: перевести неизвестные слова и сохранить для следующих отчётов."""
+    if not missing or (not missing.get("labels") and not missing.get("status_words")):
+        return
+    try:
+        from report_parser import save_learned_mapping
+        new_entries = {"labels": {}, "status_words": {}}
+        for ko in list(missing.get("labels", {}))[:30]:
+            try:
+                ru = await asyncio.wait_for(asyncio.to_thread(_translate_ko_ru_sync, ko), timeout=10)
+                if ru and ru != ko:
+                    new_entries["labels"][ko] = ru
+            except (asyncio.TimeoutError, Exception):
+                pass
+        for ko in list(missing.get("status_words", {}))[:30]:
+            try:
+                ru = await asyncio.wait_for(asyncio.to_thread(_translate_ko_ru_sync, ko), timeout=10)
+                if ru and ru != ko:
+                    new_entries["status_words"][ko] = ru
+            except (asyncio.TimeoutError, Exception):
+                pass
+        if new_entries["labels"] or new_entries["status_words"]:
+            save_learned_mapping(new_entries)
+            _log(f"LEARNED (для след. отчётов): +{len(new_entries['labels'])} подписей, +{len(new_entries['status_words'])} статусов")
+    except Exception as e:
+        _log(f"LEARNED: ошибка {e}")
 
 
 async def fetch_report_pdf_mapped(
     carid: str,
     save_path: Path,
     on_status=None,
-) -> bool:
+    base_dir: Path | None = None,
+) -> tuple[bool, Path | None, bool]:
     """
-    Режим «парсинг + маппинг + шаблон»: загружает отчёт Encar, извлекает данные,
-    применяет маппинг корейский→русский, подставляет в шаблон и сохраняет PDF.
-    Быстро, без перевода через API.
+    Режим «парсинг + маппинг + шаблон». Возвращает (успех, путь_к_HTML, картинки_загружены).
     """
     async def _status(msg: str):
         if on_status:
@@ -281,12 +503,17 @@ async def fetch_report_pdf_mapped(
         from report_parser import parse_report_html, load_mapping, apply_mapping
     except ImportError as e:
         _log(f"REPORT_MAPPED: импорт {e}")
-        return False
+        return (False, None, False)
 
     url = REPORT_URL.format(carid=carid)
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
+    report_base = base_dir if base_dir is not None else Path(__file__).resolve().parent
+    TIMEOUT_MS = 240000  # 4 минуты (Encar может грузиться долго)
 
+    # #region agent log
+    _debug_log("encar_report.py:fetch_report_pdf_mapped", "entry", {"carid": carid, "timeout_ms": TIMEOUT_MS}, "H5")
+    # #endregion
     try:
         _log("REPORT_MAPPED: старт")
         await _status("Открываю страницу Encar…")
@@ -296,38 +523,91 @@ async def fetch_report_pdf_mapped(
                 args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
             )
             try:
+                proxy = _report_proxy()
+                # #region agent log
+                _debug_log("encar_report.py:before_context", "proxy", {"proxy_on": proxy is not None}, "H2")
+                # #endregion
+                if proxy:
+                    _log("REPORT_MAPPED: прокси включён")
                 context = await browser.new_context(
                     viewport={"width": 900, "height": 1200},
                     locale="ko-KR",
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    proxy=proxy,
                 )
+                context.set_default_navigation_timeout(TIMEOUT_MS)
+                context.set_default_timeout(TIMEOUT_MS)
                 page = await context.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                # #region agent log
+                _debug_log("encar_report.py:before_goto", "before page.goto", {"url": url}, "H1")
+                # #endregion
+                await page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+                # #region agent log
+                _debug_log("encar_report.py:after_goto", "page.goto ok", {}, "H1")
+                # #endregion
                 try:
-                    await page.wait_for_selector(".inspec_carinfo, #bodydiv", timeout=12000)
+                    await page.wait_for_selector(".inspec_carinfo, #bodydiv", timeout=20000)
                 except Exception:
                     pass
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(1500)
                 _log("REPORT_MAPPED: страница загружена")
                 await _status("Извлекаю данные, формирую отчёт на русском…")
                 html = await page.content()
                 data = parse_report_html(html)
                 mapping = load_mapping()
-                data_ru = apply_mapping(data, mapping)
-                rendered = _render_report_template(data_ru)
-                await page.set_content(rendered, wait_until="domcontentloaded", timeout=10000)
-                await page.wait_for_timeout(800)
+                data_ru, missing = apply_mapping(data, mapping, return_missing=True)
+                diag = run_report_diagnostics(report_base)
+                await _status("Собираю отчёт (логотип и схемы)…")
+                rendered = _render_report_template(data_ru, base_dir=report_base, use_file_url=False, diag=diag)
+                html_path = save_path.with_suffix(".html")
+                html_path.write_text(rendered, encoding="utf-8")
+                _log(f"REPORT: HTML сохранён для резерва: {html_path}")
                 await _status("Формирую PDF…")
-                await page.pdf(path=str(save_path), format="A4", print_background=True)
+                # #region agent log
+                _debug_log("encar_report.py:before_set_content", "before set_content", {"html_len": len(rendered)}, "H3")
+                # #endregion
+                await page.set_content(rendered, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+                # #region agent log
+                _debug_log("encar_report.py:after_set_content", "set_content ok", {}, "H3")
+                # #endregion
+                await page.wait_for_timeout(3000)
+                imgs_ok = False
+                try:
+                    imgs_ok = await page.evaluate("""() => {
+                        const imgs = document.querySelectorAll('img');
+                        if (!imgs.length) return false;
+                        return Array.from(imgs).every(i => i.complete && i.naturalWidth > 0);
+                    }""")
+                except Exception:
+                    pass
+                _log(f"REPORT: картинки в странице загружены: {imgs_ok}")
+                # #region agent log
+                _debug_log("encar_report.py:before_pdf", "before page.pdf", {}, "H4")
+                # #endregion
+                await page.pdf(path=str(save_path), format="A4", print_background=True, timeout=TIMEOUT_MS)
+                # #region agent log
+                _debug_log("encar_report.py:after_pdf", "page.pdf ok", {}, "H4")
+                # #endregion
                 _log("REPORT_MAPPED: готово")
-                return True
+                if missing and (missing.get("labels") or missing.get("status_words")):
+                    asyncio.create_task(_learn_missing_after_report(missing))
+                return (True, html_path, imgs_ok)
             finally:
                 await browser.close()
+    except asyncio.TimeoutError as e:
+        # #region agent log
+        _debug_log("encar_report.py:except", "TimeoutError", {"type": "TimeoutError", "msg": str(e)}, "H1")
+        # #endregion
+        _log(f"REPORT_MAPPED: таймаут {e}")
+        return (False, None, False)
     except Exception as e:
         import traceback
+        # #region agent log
+        _debug_log("encar_report.py:except", "Exception", {"type": type(e).__name__, "msg": str(e)}, "H2,H3,H4,H5")
+        # #endregion
         _log(f"REPORT_MAPPED: ошибка {e}")
         traceback.print_exc()
-        return False
+        return (False, None, False)
 
 
 async def fetch_report_pdf(
@@ -335,81 +615,17 @@ async def fetch_report_pdf(
     save_path: Path,
     translate_to_russian: bool = True,
     on_status=None,
-) -> bool:
+    base_dir: Path | None = None,
+) -> tuple[bool, Path | None, bool]:
     """
-    Открывает страницу отчёта Encar. По умолчанию использует режим маппинга (быстро).
-    При translate_to_russian=True и необходимости можно переключиться на перевод по API.
+    Возвращает (успех, путь_к_HTML_резерва, картинки_в_PDF_ок).
     """
-    # Сначала пробуем быстрый путь: парсинг + маппинг + шаблон
-    ok = await fetch_report_pdf_mapped(carid, save_path, on_status=on_status)
-    if ok:
-        return True
-    # Fallback: старый путь с переводом HTML
-    async def _status(msg: str):
-        if on_status:
-            await on_status(msg)
-
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError:
-        raise ImportError("Установите playwright: pip install playwright && playwright install chromium")
-
-    url = REPORT_URL.format(carid=carid)
-    base_url = "https://www.encar.com"
-    save_path = Path(save_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        _log("REPORT: старт (fallback перевод)")
-        await _status("Открываю страницу Encar…")
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-            )
-            try:
-                context = await browser.new_context(
-                    viewport={"width": 900, "height": 1200},
-                    locale="ko-KR",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                )
-                page = await context.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                try:
-                    await page.wait_for_selector(".inspec_carinfo, #bodydiv", timeout=12000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(2500)
-                _log("REPORT: страница загружена")
-
-                if translate_to_russian:
-                    await _status("Страница загружена. Перевожу на русский (макс 2 мин)…")
-                    html = await page.content()
-                    try:
-                        translated_html = await asyncio.wait_for(
-                            _translate_html_async(html, base_url),
-                            timeout=TRANSLATE_TIMEOUT,
-                        )
-                    except asyncio.TimeoutError:
-                        _log("REPORT: таймаут перевода, отдаю PDF без перевода")
-                        await _status("Перевод не успел. Формирую PDF на корейском…")
-                        translated_html = None
-                    if translated_html is not None:
-                        await _status("Вставляю перевод, формирую PDF…")
-                        await page.set_content(translated_html, wait_until="networkidle", timeout=15000)
-                        await page.wait_for_timeout(1000)
-                    else:
-                        await _status("Формирую PDF…")
-                else:
-                    await _status("Формирую PDF…")
-
-                await page.pdf(path=str(save_path), format="A4", print_background=True)
-                _log("REPORT: готово")
-                return True
-            finally:
-                await browser.close()
-    except Exception as e:
-        import traceback
-        _log(f"REPORT: ошибка {e}")
-        traceback.print_exc()
-        return False
+    for attempt in range(2):
+        if attempt > 0:
+            _log("REPORT: повторная попытка…")
+            if on_status:
+                await on_status("Повторная попытка…")
+        result = await fetch_report_pdf_mapped(carid, save_path, on_status=on_status, base_dir=base_dir)
+        if result[0]:
+            return result
+    return result

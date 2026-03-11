@@ -7,7 +7,7 @@ from pathlib import Path
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-from encar_report import extract_carid, fetch_report_pdf
+from encar_report import extract_carid, fetch_report_pdf, run_report_diagnostics
 
 # ===== Настройки =====
 ADMIN_ID = 377261863  # твой Telegram ID
@@ -28,7 +28,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Привет! Можешь:\n"
         "• Отправить PDF — сохраню и дам ID для поста.\n"
         "• Написать ID машины или ссылку Encar — скачаю отчёт, переведу на русский, соберу PDF и дам ссылку.\n"
-        "• Написать /myid — покажу твой Telegram ID (для проверки админа)."
+        "• /myid — твой Telegram ID.\n"
+        "• /report_diag — диагностика логотипа и схем (админ)."
     )
 
 
@@ -42,6 +43,18 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Ты админ: {'да' if is_admin else 'нет'}",
         parse_mode="Markdown",
     )
+
+
+async def cmd_report_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Самодиагностика: где ищутся шаблоны и картинки (логотип, схемы). Только для админа."""
+    if update.message.from_user.id != ADMIN_ID:
+        await update.message.reply_text("Только для администратора.")
+        return
+    bot_dir = Path(__file__).resolve().parent
+    diag = run_report_diagnostics(bot_dir)
+    lines = diag.get("log_lines", ["Диагностика не выполнена."])
+    text = "📋 Диагностика отчёта (логотип и схемы):\n\n" + "\n".join(lines)
+    await update.message.reply_text(text[:4000])
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -112,30 +125,42 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = str(uuid.uuid4())
         file_path = STORAGE_DIR / f"{file_id}.pdf"
         print(f"[{time.strftime('%H:%M:%S')}] [BOT] вызов fetch_report_pdf carid={carid}", flush=True)
-        ok = await fetch_report_pdf(carid, file_path, on_status=report_status)
-        print(f"[{time.strftime('%H:%M:%S')}] [BOT] fetch_report_pdf вернул ok={ok}", flush=True)
+        bot_dir = Path(__file__).resolve().parent
+        ok, html_path, images_ok = await fetch_report_pdf(carid, file_path, on_status=report_status, base_dir=bot_dir)
+        print(f"[{time.strftime('%H:%M:%S')}] [BOT] fetch_report_pdf ok={ok} images_ok={images_ok} html_path={html_path}", flush=True)
         if not ok:
-            await status.edit_text("Не удалось сформировать PDF (страница не открылась или нет отчёта).")
+            await status.edit_text(
+                "Не удалось сформировать отчёт (таймаут, страница Encar недоступна или ошибка).\n"
+                "Проверьте логи бота. Команда /report_diag — диагностика логотипа и схем."
+            )
             return
         with open(file_path, "rb") as f:
             await update.message.reply_document(
-            document=f, filename=f"encar_report_{carid}_ru.pdf"
-        )
-        await status.edit_text(
-            f"Отчёт по carid={carid} переведён на русский и сохранён.\nСсылка/ID для поста: `{file_id}`",
-            parse_mode="Markdown",
-        )
+                document=f, filename=f"encar_report_{carid}_ru.pdf"
+            )
+        if html_path and html_path.exists():
+            with open(html_path, "rb") as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename=f"encar_report_{carid}_ru.html",
+                    caption="Если в PDF нет логотипа и схем — откройте этот HTML в браузере → Печать (Ctrl+P) → Сохранить как PDF." if not images_ok else None,
+                )
+        msg = f"Отчёт по carid={carid} переведён на русский и сохранён.\nСсылка/ID для поста: `{file_id}`"
+        if not images_ok and html_path:
+            msg += "\n\n⚠️ В PDF картинки могли не отобразиться — приложен HTML для печати в PDF из браузера."
+        await status.edit_text(msg, parse_mode="Markdown")
     except Exception as e:
         await status.edit_text(f"Ошибка: {e}")
 
 
 # ===== Запуск бота =====
 def main():
-    TOKEN = "8725470238:AAGiXoMb0ETxMRUwwuuIDyludQtKASBN97c"  # тестовый бот
+    TOKEN = "8596627705:AAFHUS6_b3jqhBm1NyLGsEARFhxHL0PJ4Go"  # тестовый бот
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myid", cmd_myid))
+    app.add_handler(CommandHandler("report_diag", cmd_report_diag))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 

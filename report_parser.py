@@ -96,7 +96,6 @@ def parse_report_html(html: str) -> dict[str, Any]:
             status_el = tr.select_one(".txt_state.on") or tr.select_one(".txt_state")
             status = _text(status_el) if status_el else ""
             if ths:
-                # Первый th может быть устройством (rowspan), остальные — пункт
                 first = _text(ths[0])
                 if first and first not in ("양호", "불량", "없음", "적정", "부족", "미세누유", "누유", "미세누수", "누수"):
                     if len(ths) >= 2:
@@ -106,45 +105,129 @@ def parse_report_html(html: str) -> dict[str, Any]:
                         item = first
                     out["detail"].append({"device": current_device, "item": item, "status": status})
 
+    # 5) Схема кузова: data из performanceCheck.init({ data: {...} })
+    out["diagram"] = {"zones": [], "legend_used": []}
+    idx = html.find("performanceCheck.init")
+    if idx != -1:
+        start = html.find("data", idx)
+        if start != -1:
+            colon = html.find(":", start)
+            brace = html.find("{", colon) if colon != -1 else -1
+            if brace != -1:
+                depth = 0
+                end = brace
+                for i in range(brace, min(brace + 50000, len(html))):
+                    if html[i] == "{":
+                        depth += 1
+                    elif html[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = i
+                            break
+                raw = html[brace : end + 1]
+                try:
+                    # JSON: ключи в кавычках, null → None
+                    zone_data = json.loads(raw)
+                    legend_used = set()
+                    for zone_id, value in zone_data.items():
+                        if value is None or (isinstance(value, list) and len(value) == 0):
+                            continue
+                        codes = value if isinstance(value, list) else [str(value)]
+                        out["diagram"]["zones"].append({"zone": zone_id, "codes": codes})
+                        for c in codes:
+                            legend_used.add(c)
+                    out["diagram"]["legend_used"] = sorted(legend_used)
+                except Exception:
+                    pass
+
     return out
 
 
+def _data_dir() -> Path:
+    return Path(__file__).resolve().parent / "data"
+
+
 def load_mapping() -> dict:
-    path = Path(__file__).resolve().parent / "data" / "report_mapping.json"
+    """Загружает маппинг: report_mapping.json + learned_mapping.json (если есть)."""
+    data_dir = _data_dir()
+    path = data_dir / "report_mapping.json"
     if not path.exists():
-        return {"labels": {}, "status_words": {}}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        mapping = {"labels": {}, "status_words": {}, "zone_names": {}, "diagram_codes": {}}
+    else:
+        with open(path, "r", encoding="utf-8") as f:
+            mapping = json.load(f)
+    learned_path = data_dir / "learned_mapping.json"
+    if learned_path.exists():
+        try:
+            with open(learned_path, "r", encoding="utf-8") as f:
+                learned = json.load(f)
+            mapping["labels"] = {**mapping.get("labels", {}), **learned.get("labels", {})}
+            mapping["status_words"] = {**mapping.get("status_words", {}), **learned.get("status_words", {})}
+        except Exception:
+            pass
+    return mapping
 
 
-def apply_mapping(data: dict, mapping: dict) -> dict:
+def save_learned_mapping(new_entries: dict) -> None:
+    """
+    Добавляет новые пары корейский→русский в learned_mapping.json.
+    new_entries: {"labels": { "ko": "ru", ... }, "status_words": { "ko": "ru", ... }}
+    """
+    data_dir = _data_dir()
+    learned_path = data_dir / "learned_mapping.json"
+    existing = {"labels": {}, "status_words": {}}
+    if learned_path.exists():
+        try:
+            with open(learned_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            pass
+    existing["labels"] = {**existing.get("labels", {}), **new_entries.get("labels", {})}
+    existing["status_words"] = {**existing.get("status_words", {}), **new_entries.get("status_words", {})}
+    with open(learned_path, "w", encoding="utf-8") as f:
+        json.dump(existing, f, ensure_ascii=False, indent=2)
+
+
+def apply_mapping(data: dict, mapping: dict, return_missing: bool = False):
     """
     Применяет маппинг: корейские ключи и значения статусов → русские.
-    Данные по авто (пробег, VIN, даты) не трогаем.
+    Если return_missing=True, возвращает (data_ru, missing), где missing — словари
+    неизвестных подписей и статусов для самообучения: {"labels": {ko: ru|None}, "status_words": {...}}.
     """
     labels = mapping.get("labels", {})
     status_words = mapping.get("status_words", {})
+    missing = {"labels": {}, "status_words": {}} if return_missing else None
 
     def map_label(k: str) -> str:
         k_clean = _strip(k)
-        return labels.get(k_clean, labels.get(k_clean.replace("\n", " "), k_clean))
+        res = labels.get(k_clean, labels.get(k_clean.replace("\n", " "), k_clean))
+        if return_missing and res == k_clean and k_clean and k_clean not in missing["labels"]:
+            missing["labels"][k_clean] = None
+        return res
 
     def map_value(v: str) -> str:
         if not v:
             return v
         v_clean = _strip(v)
-        return status_words.get(v_clean, v_clean)
+        res = status_words.get(v_clean, v_clean)
+        if return_missing and res == v_clean and v_clean not in missing["status_words"]:
+            missing["status_words"][v_clean] = None
+        return res
 
-    out = {"basic": {}, "summary": [], "repair": [], "detail": []}
+    zone_names = mapping.get("zone_names", {})
+    diagram_codes = mapping.get("diagram_codes", {})
+
+    out = {"basic": {}, "summary": [], "repair": [], "detail": [], "diagram": {"zones": [], "legend_used": []}}
 
     for k, v in data.get("basic", {}).items():
-        out["basic"][map_label(k)] = v
+        out["basic"][map_label(k)] = map_value(v) if isinstance(v, str) else v
 
     for row in data.get("summary", []):
+        val = row.get("value", "")
         out["summary"].append({
             "label": map_label(row.get("label", "")),
             "status": map_value(row.get("status", "")),
-            "value": row.get("value", ""),
+            "value": map_value(val) if isinstance(val, str) else val,
         })
 
     for row in data.get("repair", []):
@@ -160,4 +243,15 @@ def apply_mapping(data: dict, mapping: dict) -> dict:
             "status": map_value(row.get("status", "")),
         })
 
+    for z in data.get("diagram", {}).get("zones", []):
+        zone_id = z.get("zone", "")
+        codes = z.get("codes", [])
+        zone_ru = zone_names.get(zone_id, zone_id)
+        codes_ru = [diagram_codes.get(c, c) for c in codes]
+        out["diagram"]["zones"].append({"zone": zone_ru, "codes": codes_ru})
+    for c in data.get("diagram", {}).get("legend_used", []):
+        out["diagram"]["legend_used"].append(diagram_codes.get(c, c))
+
+    if return_missing:
+        return out, missing
     return out
