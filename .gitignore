@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
 pdf_storage/
+reports/
+data/report_cache.json
 .env
 *.log
+bot.pid

@@ -2,7 +2,12 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Отчёт о состоянии · Encar</title>
+  <title>Отчёт о состоянии автомобиля · World Ride Auto</title>
+  <meta name="description" content="Отчёт о состоянии автомобиля (история, диагностика, схема кузова). World Ride Auto.">
+  <meta property="og:title" content="Отчёт о состоянии автомобиля · World Ride Auto">
+  <meta property="og:description" content="Отчёт о состоянии автомобиля: история, диагностика, схема кузова. World Ride Auto.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="{{ og_image or '' }}">
   <style>
     :root {
       --wra-white: #fff; --wra-gray-100: #f3f4f6; --wra-gray-200: #e5e7eb;
@@ -25,27 +30,26 @@
     th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid var(--wra-gray-200); }
     th { color: var(--wra-text-muted); font-weight: 500; }
     td { color: var(--wra-gray-900); font-weight: 500; }
-    .report-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; flex-wrap: wrap; }
+    .report-header { display: flex; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
     .report-header-logo { height: 48px; width: auto; display: block; }
-    .report-header-title { font-size: 1.35rem; font-weight: 700; color: var(--wra-gray-900); margin: 0; }
-    .report-note { font-size: 0.8rem; color: var(--wra-blue-note); margin: 0 0 1.25rem 0; }
     .report-title { font-size: 1.25rem; font-weight: 700; margin-bottom: 1.5rem; color: var(--wra-gray-900); }
+    .value-good { background: #dcfce7; color: #166534; padding: 0.15em 0.5em; border-radius: 6px; display: inline-block; }
+    .value-bad { background: #fee2e2; color: #991b1b; padding: 0.15em 0.5em; border-radius: 6px; display: inline-block; }
+    .value-actual { background: #e5e7eb; color: #374151; padding: 0.15em 0.5em; border-radius: 6px; display: inline-block; }
     .detail-device { color: var(--wra-blue); font-weight: 600; vertical-align: top; }
     .detail-table .detail-device { min-width: 10em; }
     .section-diagram { }
     .diagram-legend-caption { margin: 0 0 0.5rem 0; font-size: var(--text-sm); color: var(--wra-text-muted); }
     .diagram-legend { list-style: none; margin: 0 0 1rem 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; font-size: var(--text-sm); }
-    .diagram-legend li { display: flex; align-items: center; gap: 0.35rem; }
-    .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
-    .dot-change { background: #e11d48; }
-    .dot-metal { background: #f59e0b; }
-    .dot-corrosion { background: #84cc16; }
-    .dot-scratch { background: #3b82f6; }
-    .dot-dent { background: #8b5cf6; }
-    .dot-damage { background: #6b7280; }
+    .diagram-legend li { display: flex; align-items: center; gap: 0.4rem; }
+    .diagram-legend-icon { width: 20px; height: 20px; flex-shrink: 0; object-fit: contain; }
     .diagram-images { display: flex; flex-wrap: wrap; gap: var(--space-6); margin-bottom: 1rem; }
     .diagram-images figure { margin: 0; text-align: center; }
-    .diagram-img { max-width: 100%; height: auto; max-height: 280px; display: block; }
+    .diagram-figure-wrap { position: relative; display: inline-block; max-width: 100%; }
+    .diagram-img { max-width: 100%; height: auto; max-height: 280px; display: block; vertical-align: top; }
+    .diagram-overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+    .diagram-overlay svg { width: 100%; height: 100%; display: block; }
+    .diagram-overlay image { opacity: 0.9; }
     .diagram-images figcaption { font-size: var(--text-sm); color: var(--wra-text-muted); margin-top: 0.35rem; }
     .diagram-zones { margin-top: 0.5rem; }
   </style>
@@ -56,9 +60,7 @@
       {% if logo_src %}
       <img src="{{ logo_src }}" alt="" class="report-header-logo" />
       {% endif %}
-      <h1 class="report-header-title">{{ company_name or "World Ride Auto" }}</h1>
     </header>
-    <p class="report-note">Отчёт выгружен автоматически с Encar.</p>
     <h2 class="report-title">Отчёт о состоянии автомобиля</h2>
 
     {% if basic %}
@@ -81,7 +83,20 @@
         <thead><tr><th>Позиция</th><th>Состояние</th><th>Значение</th></tr></thead>
         <tbody>
         {% for row in summary %}
-        <tr><td>{{ row.label }}</td><td>{{ row.status }}</td><td>{{ row.value }}</td></tr>
+        <tr>
+          <td>{{ row.label }}</td>
+          <td>{{ row.status }}</td>
+          <td>{% set v = row.value or '' %}
+            {% set actual = row.value_actual %}
+            {% if not actual and v %}{% set parts = v.split() %}{% if parts|length >= 2 and parts[-1] in ['Да', 'Нет', 'хорошо', 'плохо'] %}{% set actual = parts[-1] %}{% endif %}{% endif %}
+            {% if actual %}
+            {{ v|replace(actual, '<span class="value-actual">' ~ actual ~ '</span>')|safe }}
+            {% else %}{% set v_lower = v|lower %}
+            {% if v_lower in ('плохо', 'нет') %}<span class="value-bad">{{ row.value }}</span>
+            {% elif v_lower in ('хорошо', 'да') %}<span class="value-good">{{ row.value }}</span>
+            {% else %}{{ row.value }}{% endif %}{% endif %}
+          </td>
+        </tr>
         {% endfor %}
         </tbody>
       </table>
@@ -101,6 +116,75 @@
     </div>
     {% endif %}
 
+    {% if diagram %}
+    <div class="section section-diagram">
+      <h2>Схема состояния кузова</h2>
+      <p class="diagram-legend-caption">Обозначения:</p>
+      <ul class="diagram-legend">
+        {% set code_icons = diagram_code_icons or {} %}
+        {% set legend_labels = diagram_legend_labels or {} %}
+        {% for code, label in (diagram_legend_labels or {}).items() %}
+        {% if code_icons.get(code) %}
+        <li><img src="{{ code_icons[code] }}" alt="" class="diagram-legend-icon" /> {{ label }}</li>
+        {% endif %}
+        {% endfor %}
+      </ul>
+      <div class="diagram-images">
+        <figure>
+          <div class="diagram-figure-wrap">
+            <img src="{{ diagram_outer_src or 'https://www.encar.com/images/pop/check/img_inspection01.gif' }}" alt="Внешние панели" class="diagram-img" />
+            {% set viewbox_outer = diagram_outer_viewbox or diagram_viewbox or '0 0 400 200' %}
+            {% set icon_size = diagram_icon_size or 24 %}
+            {% set outer_data = diagram_outer_data or {} %}
+            {% if outer_data and diagram.zones %}
+            <div class="diagram-overlay" aria-hidden="true">
+              <svg viewBox="{{ viewbox_outer }}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+                {% for z in diagram.zones %}
+                {% if z.zone_id and z.code and outer_data.get(z.zone_id) and (diagram_code_icons or {}).get(z.code) %}
+                {% set o = outer_data[z.zone_id] %}
+                <image x="{{ o.cx - icon_size / 2 }}" y="{{ o.cy - icon_size / 2 }}" width="{{ icon_size }}" height="{{ icon_size }}" href="{{ diagram_code_icons[z.code] }}" />
+                {% endif %}
+                {% endfor %}
+              </svg>
+            </div>
+            {% endif %}
+          </div>
+          <figcaption>Внешние панели</figcaption>
+        </figure>
+        <figure>
+          <div class="diagram-figure-wrap">
+            <img src="{{ diagram_inner_src or 'https://www.encar.com/images/pop/check/img_inspection02_new.gif' }}" alt="Основная структура" class="diagram-img" />
+            {% set viewbox_inner = diagram_inner_viewbox or diagram_viewbox or '0 0 400 200' %}
+            {% set inner_data = diagram_inner_data or {} %}
+            {% if inner_data and diagram.zones %}
+            <div class="diagram-overlay" aria-hidden="true">
+              <svg viewBox="{{ viewbox_inner }}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+                {% for z in diagram.zones %}
+                {% if z.zone_id and z.code and inner_data.get(z.zone_id) and (diagram_code_icons or {}).get(z.code) %}
+                {% set i = inner_data[z.zone_id] %}
+                <image x="{{ i.cx - icon_size / 2 }}" y="{{ i.cy - icon_size / 2 }}" width="{{ icon_size }}" height="{{ icon_size }}" href="{{ diagram_code_icons[z.code] }}" />
+                {% endif %}
+                {% endfor %}
+              </svg>
+            </div>
+            {% endif %}
+          </div>
+          <figcaption>Основная структура</figcaption>
+        </figure>
+      </div>
+      {% if diagram.zones %}
+      <table class="diagram-zones">
+        <thead><tr><th>Элемент</th><th>Состояние</th></tr></thead>
+        <tbody>
+        {% for z in diagram.zones %}
+        <tr><td>{{ z.zone }}</td><td>{{ z.codes | join(', ') }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+    {% endif %}
+
     {% if detail %}
     <div class="section">
       <h2>Детальная диагностика</h2>
@@ -117,41 +201,6 @@
         {% endfor %}
         </tbody>
       </table>
-    </div>
-    {% endif %}
-
-    {% if diagram %}
-    <div class="section section-diagram">
-      <h2>Схема состояния кузова</h2>
-      <p class="diagram-legend-caption">Обозначения:</p>
-      <ul class="diagram-legend">
-        <li><span class="dot dot-change"></span> Замена</li>
-        <li><span class="dot dot-metal"></span> Окрас/сварка</li>
-        <li><span class="dot dot-corrosion"></span> Коррозия</li>
-        <li><span class="dot dot-scratch"></span> Царапина</li>
-        <li><span class="dot dot-dent"></span> Вмятина</li>
-        <li><span class="dot dot-damage"></span> Повреждение</li>
-      </ul>
-      <div class="diagram-images">
-        <figure>
-          <img src="{{ diagram_outer_src or 'https://www.encar.com/images/pop/check/img_inspection01.gif' }}" alt="Внешние панели" class="diagram-img" />
-          <figcaption>Внешние панели</figcaption>
-        </figure>
-        <figure>
-          <img src="{{ diagram_inner_src or 'https://www.encar.com/images/pop/check/img_inspection02_new.gif' }}" alt="Основная структура" class="diagram-img" />
-          <figcaption>Основная структура</figcaption>
-        </figure>
-      </div>
-      {% if diagram.zones %}
-      <table class="diagram-zones">
-        <thead><tr><th>Элемент</th><th>Состояние</th></tr></thead>
-        <tbody>
-        {% for z in diagram.zones %}
-        <tr><td>{{ z.zone }}</td><td>{{ z.codes | join(', ') }}</td></tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      {% endif %}
     </div>
     {% endif %}
   </div>

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -8,13 +9,27 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 from encar_report import extract_carid, fetch_report_pdf, run_report_diagnostics
+from report_cache import get_cached_token, save_report
+from report_server import run_server
 
 # ===== Настройки =====
-ADMIN_ID = 377261863  # твой Telegram ID
+ADMIN_ID = int(os.environ.get("TELEGRAM_ADMIN_ID", "377261863"))
 STORAGE_DIR = Path("pdf_storage")
-STORAGE_DIR.mkdir(exist_ok=True)
+REPORTS_DIR = Path(os.environ.get("REPORTS_DIR", "reports"))
+DATA_DIR = Path(__file__).resolve().parent / "data"
+BASE_URL = os.environ.get("REPORT_BASE_URL", "").rstrip("/")
+REPORT_SERVER_PORT = int(os.environ.get("REPORT_SERVER_PORT", "8080"))
 
-# Лог в консоль, чтобы видеть входящие сообщения
+# Сообщение для обычных пользователей (только админ запрашивает отчёты)
+NON_ADMIN_MESSAGE = (
+    "Все отчёты формируются автоматически, подробнее с каждым отчётом вы можете ознакомиться "
+    "в объявлениях в нашем канале World Ride Auto — https://t.me/worldrideauto\n\n"
+    "Спасибо, что выбираете нас!"
+)
+
+STORAGE_DIR.mkdir(exist_ok=True)
+REPORTS_DIR.mkdir(exist_ok=True)
+
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
@@ -22,20 +37,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _inject_og_url(html_path: Path, report_url: str) -> None:
+    """Добавляет og:url в <head> сохранённого HTML для превью в мессенджерах."""
+    try:
+        text = html_path.read_text(encoding="utf-8")
+        meta = f'<meta property="og:url" content="{report_url}">'
+        if "og:url" in text:
+            return
+        text = text.replace("</head>", meta + "\n  </head>", 1)
+        html_path.write_text(text, encoding="utf-8")
+    except Exception:
+        pass
+
+
 # ===== Команды =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text(NON_ADMIN_MESSAGE)
+        return
     await update.message.reply_text(
         "Привет! Можешь:\n"
         "• Отправить PDF — сохраню и дам ID для поста.\n"
-        "• Написать ID машины или ссылку Encar — скачаю отчёт, переведу на русский, соберу PDF и дам ссылку.\n"
+        "• Написать ID машины или ссылку Encar — сформирую отчёт и дам ссылку для объявления (HTML, кэш 48 ч, ссылка 7 дней).\n"
         "• /myid — твой Telegram ID.\n"
-        "• /report_diag — диагностика логотипа и схем (админ)."
+        "• /report_diag — диагностика логотипа и схем."
     )
 
 
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка: твой ID и совпадает ли с админом."""
     user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text(NON_ADMIN_MESSAGE)
+        return
     is_admin = user_id == ADMIN_ID
     await update.message.reply_text(
         f"Твой Telegram ID: `{user_id}`\n"
@@ -46,9 +81,8 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_report_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Самодиагностика: где ищутся шаблоны и картинки (логотип, схемы). Только для админа."""
     if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("Только для администратора.")
+        await update.message.reply_text(NON_ADMIN_MESSAGE)
         return
     bot_dir = Path(__file__).resolve().parent
     diag = run_report_diagnostics(bot_dir)
@@ -58,25 +92,20 @@ async def cmd_report_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("Ты не имеешь права загружать файлы.")
+    if update.message.from_user.id != ADMIN_ID:
+        await update.message.reply_text(NON_ADMIN_MESSAGE)
         return
-
     doc = update.message.document
     if doc.mime_type != "application/pdf":
         await update.message.reply_text("Только PDF разрешено!")
         return
-
     file_id = str(uuid.uuid4())
     file_path = STORAGE_DIR / f"{file_id}.pdf"
-
     await doc.get_file().download_to_drive(file_path)
     await update.message.reply_text(f"PDF сохранен. Ссылка/ID для поста: `{file_id}`", parse_mode="Markdown")
 
 
 def _looks_like_encar_or_id(text: str) -> bool:
-    """Сообщение похоже на ссылку Encar или ID машины."""
     if not text:
         return False
     t = text.strip().lower()
@@ -90,17 +119,13 @@ def _looks_like_encar_or_id(text: str) -> bool:
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = (update.message.text or "").strip()
-
     carid_extracted = extract_carid(text)
-    # В консоли видно каждое входящее сообщение (для отладки)
+
     print(f"[{time.strftime('%H:%M:%S')}] [Текст] user_id={user_id} len={len(text)} carid={carid_extracted}", flush=True)
     logger.info("Текст от %s, carid=%s", user_id, carid_extracted)
 
     if user_id != ADMIN_ID:
-        if _looks_like_encar_or_id(text):
-            await update.message.reply_text(
-                "Запрашивать отчёты по ссылке или ID может только администратор."
-            )
+        await update.message.reply_text(NON_ADMIN_MESSAGE)
         return
 
     carid = carid_extracted
@@ -111,9 +136,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    status = await update.message.reply_text(
-        f"Запрашиваю отчёт Encar для carid={carid}…"
-    )
+    bot_dir = Path(__file__).resolve().parent
+    cached_token = get_cached_token(carid, DATA_DIR)
+    if cached_token and BASE_URL:
+        report_url = f"{BASE_URL}/r/{cached_token}"
+        await update.message.reply_text(
+            f"Посмотреть отчёт об истории авто: {report_url}"
+        )
+        return
+
+    status = await update.message.reply_text(f"Запрашиваю отчёт Encar для carid={carid}…")
 
     async def report_status(msg: str):
         try:
@@ -125,47 +157,69 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = str(uuid.uuid4())
         file_path = STORAGE_DIR / f"{file_id}.pdf"
         print(f"[{time.strftime('%H:%M:%S')}] [BOT] вызов fetch_report_pdf carid={carid}", flush=True)
-        bot_dir = Path(__file__).resolve().parent
         ok, html_path, images_ok = await fetch_report_pdf(carid, file_path, on_status=report_status, base_dir=bot_dir)
-        print(f"[{time.strftime('%H:%M:%S')}] [BOT] fetch_report_pdf ok={ok} images_ok={images_ok} html_path={html_path}", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}] [BOT] fetch_report_pdf ok={ok} html_path={html_path}", flush=True)
         if not ok:
             await status.edit_text(
                 "Не удалось сформировать отчёт (таймаут, страница Encar недоступна или ошибка).\n"
                 "Проверьте логи бота. Команда /report_diag — диагностика логотипа и схем."
             )
             return
-        with open(file_path, "rb") as f:
-            await update.message.reply_document(
-                document=f, filename=f"encar_report_{carid}_ru.pdf"
+
+        if not BASE_URL:
+            await status.edit_text(
+                "Отчёт сформирован, но REPORT_BASE_URL не задан — ссылку для объявлений выдать нельзя. "
+                "Задайте переменную окружения REPORT_BASE_URL (например https://ваш-домен.com)."
             )
-        if html_path and html_path.exists():
-            with open(html_path, "rb") as f:
-                await update.message.reply_document(
-                    document=f,
-                    filename=f"encar_report_{carid}_ru.html",
-                    caption="Если в PDF нет логотипа и схем — откройте этот HTML в браузере → Печать (Ctrl+P) → Сохранить как PDF." if not images_ok else None,
-                )
-        msg = f"Отчёт по carid={carid} переведён на русский и сохранён.\nСсылка/ID для поста: `{file_id}`"
-        if not images_ok and html_path:
-            msg += "\n\n⚠️ В PDF картинки могли не отобразиться — приложен HTML для печати в PDF из браузера."
-        await status.edit_text(msg, parse_mode="Markdown")
+            if html_path and html_path.exists():
+                with open(html_path, "rb") as f:
+                    await update.message.reply_document(document=f, filename=f"encar_report_{carid}_ru.html")
+            return
+
+        html_content = html_path.read_text(encoding="utf-8")
+        token = save_report(carid, html_content, REPORTS_DIR, DATA_DIR)
+        report_file = REPORTS_DIR / f"{token}.html"
+        report_url = f"{BASE_URL}/r/{token}"
+        _inject_og_url(report_file, report_url)
+
+        await status.edit_text(f"Отчёт по carid={carid} готов. Ссылка действительна 7 дней.")
+        await update.message.reply_text(f"Посмотреть отчёт об истории авто: {report_url}")
     except Exception as e:
         await status.edit_text(f"Ошибка: {e}")
 
 
-# ===== Запуск бота =====
 def main():
-    TOKEN = "8596627705:AAFHUS6_b3jqhBm1NyLGsEARFhxHL0PJ4Go"  # тестовый бот
-    app = ApplicationBuilder().token(TOKEN).build()
+    pid_file = Path(__file__).resolve().parent / "bot.pid"
+    try:
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("myid", cmd_myid))
-    app.add_handler(CommandHandler("report_diag", cmd_report_diag))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    bot_dir = Path(__file__).resolve().parent
+    template_dir = bot_dir / "templates"
+    server_thread = threading.Thread(
+        target=lambda: run_server(port=REPORT_SERVER_PORT, reports_dir=REPORTS_DIR, data_dir=DATA_DIR, template_dir=template_dir),
+        daemon=True,
+    )
+    server_thread.start()
+    print(f"Сервер отчётов: http://0.0.0.0:{REPORT_SERVER_PORT}/r/<token>")
 
-    print("Бот запущен…")
-    app.run_polling()
+    try:
+        TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8596627705:AAFHUS6_b3jqhBm1NyLGsEARFhxHL0PJ4Go")
+        app = ApplicationBuilder().token(TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("myid", cmd_myid))
+        app.add_handler(CommandHandler("report_diag", cmd_report_diag))
+        app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        print("Бот запущен…")
+        app.run_polling()
+    finally:
+        try:
+            if pid_file.exists():
+                pid_file.unlink()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

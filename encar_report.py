@@ -299,6 +299,72 @@ LOGO_NAMES = ("logo.png", "logo.svg")
 DIAGRAM_OUTER_NAMES = ("diagram_outer.png", "diagram_outer.png.png")
 DIAGRAM_INNER_NAMES = ("diagram_inner.png", "diagram_inner.png.png")
 
+# Иконки схемы: код → имя файла в templates/images
+DIAGRAM_CODE_ICONS = {
+    "CHANGE": "Exchange.svg",
+    "METAL": "Painted.svg",
+    "CORROSION": "corrosion.svg",
+    "SCRATCH": "Scratch.svg",
+    "DENT": "Repair.svg",
+    "DAMAGE": "Damage.svg",
+}
+# Подписи легенды (код → рус.)
+DIAGRAM_LEGEND_LABELS = {
+    "CHANGE": "Замена",
+    "METAL": "Окрас/сварка",
+    "CORROSION": "Коррозия",
+    "SCRATCH": "Царапина",
+    "DENT": "Вмятина",
+    "DAMAGE": "Повреждение",
+}
+DIAGRAM_VIEWBOX = "0 0 400 200"
+# Канонические размеры схем (один вид сверху на каждое изображение), для масштабирования
+DIAGRAM_OUTER_CANONICAL = (400, 200)
+DIAGRAM_INNER_CANONICAL = (400, 200)
+DIAGRAM_ICON_SIZE = 24
+
+
+def _load_diagram_zone_data(data_dir: Path) -> tuple[dict, dict]:
+    """Загружает зоны из JSON. Возвращает (outer_data, inner_data):
+    каждый элемент — zone_id -> {"d": path_d, "cx": cx, "cy": cy}."""
+    def points_to_d(points: list) -> str:
+        if not points or len(points) < 2:
+            return ""
+        parts = [f"M {points[0][0]} {points[0][1]}"]
+        for p in points[1:]:
+            parts.append(f"L {p[0]} {p[1]}")
+        parts.append("Z")
+        return " ".join(parts)
+
+    def centroid(points: list) -> tuple[float, float]:
+        if not points:
+            return (0, 0)
+        n = len(points)
+        cx = sum(p[0] for p in points) / n
+        cy = sum(p[1] for p in points) / n
+        return (cx, cy)
+
+    def load_zones(path: Path) -> dict:
+        out = {}
+        if not path.exists():
+            return out
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            for zone_id, pts in raw.items():
+                if isinstance(pts, list) and len(pts) >= 2:
+                    d = points_to_d(pts)
+                    cx, cy = centroid(pts)
+                    if d:
+                        out[zone_id] = {"d": d, "cx": cx, "cy": cy}
+        except Exception:
+            pass
+        return out
+
+    data_dir = data_dir or Path(__file__).resolve().parent / "data"
+    outer = load_zones(data_dir / "diagram_outer_zones.json")
+    inner = load_zones(data_dir / "diagram_inner_zones.json")
+    return outer, inner
+
 
 def run_report_diagnostics(base_dir: Path | None) -> dict:
     """
@@ -386,6 +452,8 @@ def _render_report_template(data_ru: dict, base_dir: Path | None = None, use_fil
     logo_path = diag.get("logo_path")
     outer_path = diag.get("diagram_outer_path")
     inner_path = diag.get("diagram_inner_path")
+    diagram_outer_size = None
+    diagram_inner_size = None
 
     if use_file_url:
         if "logo_src" not in data_ru and logo_path:
@@ -397,14 +465,15 @@ def _render_report_template(data_ru: dict, base_dir: Path | None = None, use_fil
             data_ru["diagram_inner_src"] = f"images/{inner_path.name}"
     else:
         import base64
-        def _embed_resized(path: Path | None, mime: str, max_size: int = 520) -> str | None:
+        def _embed_resized(path: Path | None, mime: str, max_size: int = 520) -> tuple[str | None, int | None, int | None]:
+            """Возвращает (data_uri, width, height). Для SVG или ошибки — (src, None, None)."""
             if path is None or not path.exists():
-                return None
+                return (None, None, None)
             try:
                 raw = path.read_bytes()
                 if mime == "image/svg+xml":
                     b64 = base64.b64encode(raw).decode("ascii")
-                    return f"data:{mime};base64,{b64}"
+                    return (f"data:{mime};base64,{b64}", None, None)
                 try:
                     from PIL import Image
                     import io
@@ -423,34 +492,82 @@ def _render_report_template(data_ru: dict, base_dir: Path | None = None, use_fil
                             img = img.resize((max_size, int(h * max_size / w)), resample)
                         else:
                             img = img.resize((int(w * max_size / h), max_size), resample)
+                    w, h = img.size
                     buf = io.BytesIO()
                     img.save(buf, format="PNG", optimize=True)
                     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-                    return f"data:image/png;base64,{b64}"
+                    return (f"data:image/png;base64,{b64}", w, h)
                 except Exception:
                     b64 = base64.b64encode(raw).decode("ascii")
-                    return f"data:{mime};base64,{b64}"
+                    return (f"data:{mime};base64,{b64}", None, None)
             except Exception:
-                return None
+                return (None, None, None)
         if "logo_src" not in data_ru:
             if logo_path:
                 mime = "image/svg+xml" if logo_path.suffix.lower() == ".svg" else "image/png"
-                src = _embed_resized(logo_path, mime, max_size=160)
+                src, _, _ = _embed_resized(logo_path, mime, max_size=160)
                 if src:
                     data_ru["logo_src"] = src
                     _log(f"REPORT: логотип встроен ({logo_path.name})")
             if "logo_src" not in data_ru:
                 _log("REPORT: логотип не найден")
         if "diagram_outer_src" not in data_ru and outer_path:
-            src = _embed_resized(outer_path, "image/png", max_size=520)
+            src, w, h = _embed_resized(outer_path, "image/png", max_size=520)
             if src:
                 data_ru["diagram_outer_src"] = src
+                if w is not None and h is not None:
+                    diagram_outer_size = (w, h)
                 _log(f"REPORT: схема встроена ({outer_path.name})")
         if "diagram_inner_src" not in data_ru and inner_path:
-            src = _embed_resized(inner_path, "image/png", max_size=520)
+            src, w, h = _embed_resized(inner_path, "image/png", max_size=520)
             if src:
                 data_ru["diagram_inner_src"] = src
+                if w is not None and h is not None:
+                    diagram_inner_size = (w, h)
                 _log(f"REPORT: схема встроена ({inner_path.name})")
+
+    # Иконки для легенды и схемы (код → data URI SVG)
+    import base64 as _b64
+    diagram_code_icons = {}
+    for code, filename in DIAGRAM_CODE_ICONS.items():
+        icon_path = images_dir / filename
+        if icon_path.exists():
+            try:
+                raw = icon_path.read_bytes()
+                diagram_code_icons[code] = f"data:image/svg+xml;base64,{_b64.b64encode(raw).decode('ascii')}"
+            except Exception:
+                pass
+    data_ru["diagram_code_icons"] = diagram_code_icons
+    data_ru["diagram_legend_labels"] = DIAGRAM_LEGEND_LABELS
+    data_ru["diagram_icon_size"] = DIAGRAM_ICON_SIZE
+
+    # Координаты зон: каноническое пространство из JSON (outer 600×200, inner 600×200), масштабируем под размер картинки
+    data_dir = Path(__file__).resolve().parent / "data"
+    diagram_outer_data, diagram_inner_data = _load_diagram_zone_data(data_dir)
+    def _scale_zone_data(zone_data: dict, size: tuple[int, int] | None, canonical: tuple[int, int]) -> tuple[dict, str]:
+        if not size:
+            cw, ch = canonical
+            return zone_data, f"0 0 {cw} {ch}"
+        w, h = size
+        cw, ch = canonical
+        scaled = {}
+        for zid, v in zone_data.items():
+            scaled[zid] = {
+                "d": v["d"],
+                "cx": v["cx"] * w / cw,
+                "cy": v["cy"] * h / ch,
+            }
+        return scaled, f"0 0 {w} {h}"
+    diagram_outer_data, diagram_outer_viewbox = _scale_zone_data(
+        diagram_outer_data, diagram_outer_size, DIAGRAM_OUTER_CANONICAL
+    )
+    diagram_inner_data, diagram_inner_viewbox = _scale_zone_data(
+        diagram_inner_data, diagram_inner_size, DIAGRAM_INNER_CANONICAL
+    )
+    data_ru["diagram_outer_data"] = diagram_outer_data
+    data_ru["diagram_inner_data"] = diagram_inner_data
+    data_ru["diagram_outer_viewbox"] = diagram_outer_viewbox
+    data_ru["diagram_inner_viewbox"] = diagram_inner_viewbox
 
     env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=True)
     template = env.get_template("report_ru.html")
@@ -584,7 +701,7 @@ async def fetch_report_pdf_mapped(
                 # #region agent log
                 _debug_log("encar_report.py:before_pdf", "before page.pdf", {}, "H4")
                 # #endregion
-                await page.pdf(path=str(save_path), format="A4", print_background=True, timeout=TIMEOUT_MS)
+                await page.pdf(path=str(save_path), format="A4", print_background=True)
                 # #region agent log
                 _debug_log("encar_report.py:after_pdf", "page.pdf ok", {}, "H4")
                 # #endregion

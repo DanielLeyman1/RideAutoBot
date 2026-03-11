@@ -60,9 +60,14 @@ def parse_report_html(html: str) -> dict[str, Any]:
             # Статус: .txt_state.on или первый .txt_state
             status_el = tr.select_one(".txt_state.on") or tr.select_one(".txt_state")
             status = _text(status_el) if status_el else ""
-            # Значение: .txt_detail или вторая td
+            # Значение: .txt_detail или вторая td; актуальный выбор — .txt_state.on внутри ячейки
             detail_el = tr.select_one(".txt_detail")
             value = _text(detail_el) if detail_el else ""
+            value_actual = ""
+            if detail_el:
+                on_el = detail_el.select_one(".txt_state.on")
+                if on_el:
+                    value_actual = _text(on_el)
             if not value and status:
                 tds = tr.select("td.td_left")
                 for td in tds:
@@ -70,7 +75,7 @@ def parse_report_html(html: str) -> dict[str, Any]:
                     if t and t != status and not t.startswith("span"):
                         value = t
                         break
-            out["summary"].append({"label": label, "status": status, "value": value})
+            out["summary"].append({"label": label, "status": status, "value": value, "value_actual": value_actual})
 
     # 3) Секция ремонта .section_repair
     section_repair = soup.select_one(".section_repair table.tbl_repair")
@@ -224,10 +229,12 @@ def apply_mapping(data: dict, mapping: dict, return_missing: bool = False):
 
     for row in data.get("summary", []):
         val = row.get("value", "")
+        val_actual = row.get("value_actual", "")
         out["summary"].append({
             "label": map_label(row.get("label", "")),
             "status": map_value(row.get("status", "")),
             "value": map_value(val) if isinstance(val, str) else val,
+            "value_actual": map_value(val_actual) if isinstance(val_actual, str) else val_actual,
         })
 
     for row in data.get("repair", []):
@@ -248,7 +255,12 @@ def apply_mapping(data: dict, mapping: dict, return_missing: bool = False):
         codes = z.get("codes", [])
         zone_ru = zone_names.get(zone_id, zone_id)
         codes_ru = [diagram_codes.get(c, c) for c in codes]
-        out["diagram"]["zones"].append({"zone": zone_ru, "codes": codes_ru})
+        out["diagram"]["zones"].append({
+            "zone": zone_ru,
+            "zone_id": zone_id,
+            "codes": codes_ru,
+            "code": codes[0] if codes else "",
+        })
     for c in data.get("diagram", {}).get("legend_used", []):
         out["diagram"]["legend_used"].append(diagram_codes.get(c, c))
 
