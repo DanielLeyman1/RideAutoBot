@@ -449,21 +449,37 @@ def _render_report_template(data_ru: dict, base_dir: Path | None = None, use_fil
     if "company_name" not in data_ru:
         data_ru["company_name"] = os.environ.get("REPORT_COMPANY_NAME", "World Ride Auto")
 
-    # Нормализация блока «Общее состояние»: пробег «Много» только от 70 000 км; в ячейке «Значение» — только выбранный вариант
+    # Нормализация блока «Общее состояние»: пробег «Много» только от 70 000 км; одометр — хорошо / Большой по тому же правилу
     import re
     MILEAGE_HIGH_KM = 70_000
     OPTION_PAIRS = ("хорошо плохо", "плохо хорошо", "Нет Да", "Да Нет")
-    for row in data_ru.get("summary", []):
+    summary_list = data_ru.get("summary", [])
+    km = None
+    for row in summary_list:
         if row.get("label") == "Пробег":
             raw = re.sub(r"[^\d]", "", str(row.get("value", "")))
             try:
                 km = int(raw) if raw else 0
-                if km < MILEAGE_HIGH_KM and row.get("status") == "Много":
-                    row["status"] = "Норма"
-                if km >= 0:
-                    row["value"] = f"{km:,}".replace(",", " ") + " км"
             except ValueError:
+                km = 0
+            break
+    for row in summary_list:
+        if row.get("label") == "Пробег":
+            try:
+                if km is not None and km < MILEAGE_HIGH_KM and row.get("status") == "Много":
+                    row["status"] = "Норма"
+                if km is not None and km >= 0:
+                    row["value"] = f"{km:,}".replace(",", " ") + " км"
+            except (ValueError, TypeError):
                 pass
+        elif row.get("label") == "Состояние одометра" and km is not None:
+            if km < MILEAGE_HIGH_KM:
+                row["status"] = "Без замечаний"
+                row["value"] = "хорошо"
+            else:
+                row["status"] = "Большой"
+                row["value"] = "Большой"
+            row["value_actual"] = ""
         val = (row.get("value") or "").strip()
         val_actual = (row.get("value_actual") or "").strip()
         if val_actual and val in OPTION_PAIRS:

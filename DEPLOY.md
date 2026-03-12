@@ -4,7 +4,11 @@
 
 ## 1. Зависимости Python
 
+После каждого `git pull` переустановите зависимости (иначе возможны ошибки вроде `No module named 'bs4'`):
+
 ```bash
+cd /root/encar_bot_ride_car   # или ваш путь к боту
+source venv/bin/activate     # если используете venv
 pip install -r requirements.txt
 ```
 
