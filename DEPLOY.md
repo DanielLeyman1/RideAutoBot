@@ -38,8 +38,23 @@ playwright install-deps chromium
 
 В логах ищите строки:
 
-- `REPORT_MAPPED: FAIL type=... msg=...` — точный тип и текст ошибки
+- `REPORT_MAPPED: FAIL phase=... type=... msg=...` — на каком этапе упало и текст ошибки
+- Этапы: `goto` (загрузка Encar), `parse` (парсинг/маппинг), `diag`/`render` (шаблон), `set_content` (HTML в браузер), `pdf` (генерация PDF)
+- Если `phase=pdf` — часто не хватает зависимостей Chromium на сервере: `playwright install-deps chromium` или шрифты
 - `REPORT_MAPPED: таймаут` — таймаут загрузки страницы или прокси
 - `REPORT_MAPPED: импорт` — не установлен playwright или report_parser
 
 Команда в боте: `/report_diag` — проверка логотипа и схем (шаблоны); если там всё «да», проблема в загрузке Encar или в Playwright/прокси.
+
+## 5. Один экземпляр бота (Conflict)
+
+Ошибка `Conflict: terminated by other getUpdates request` значит, что запущено два процесса бота с одним токеном. Перед новым запуском остановите старый процесс:
+
+```bash
+# если бот запущен вручную — найдите PID и завершите:
+cat bot.pid   # показать PID
+kill $(cat bot.pid)   # остановить
+# затем запускайте бота снова
+```
+
+При старте бот пишет свой PID в `bot.pid` и проверяет, не запущен ли уже другой экземпляр; если да — выходит с сообщением.

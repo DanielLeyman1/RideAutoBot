@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 import os
+import sys
 import threading
 import time
 import uuid
@@ -190,6 +191,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     pid_file = Path(__file__).resolve().parent / "bot.pid"
+    # Один экземпляр бота (избегаем Conflict от Telegram)
+    if pid_file.exists():
+        try:
+            old_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            os.kill(old_pid, 0)  # проверка: процесс жив?
+            print(f"Уже запущен другой экземпляр бота (PID {old_pid}). Остановите его или удалите {pid_file}.", flush=True)
+            sys.exit(1)
+        except (ValueError, OSError):
+            try:
+                pid_file.unlink()
+            except Exception:
+                pass
     try:
         pid_file.write_text(str(os.getpid()), encoding="utf-8")
     except Exception:

@@ -631,13 +631,19 @@ async def fetch_report_pdf_mapped(
     # #region agent log
     _debug_log("encar_report.py:fetch_report_pdf_mapped", "entry", {"carid": carid, "timeout_ms": TIMEOUT_MS}, "H5")
     # #endregion
+    phase = "start"
     try:
         _log("REPORT_MAPPED: старт")
         await _status("Открываю страницу Encar…")
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",  # часто нужно на сервере/Docker
+                    "--disable-gpu",
+                ],
             )
             try:
                 proxy = _report_proxy()
@@ -655,6 +661,7 @@ async def fetch_report_pdf_mapped(
                 context.set_default_navigation_timeout(TIMEOUT_MS)
                 context.set_default_timeout(TIMEOUT_MS)
                 page = await context.new_page()
+                phase = "goto"
                 # #region agent log
                 _debug_log("encar_report.py:before_goto", "before page.goto", {"url": url}, "H1")
                 # #endregion
@@ -669,17 +676,22 @@ async def fetch_report_pdf_mapped(
                 await page.wait_for_timeout(1500)
                 _log("REPORT_MAPPED: страница загружена")
                 await _status("Извлекаю данные, формирую отчёт на русском…")
+                phase = "parse"
                 html = await page.content()
                 data = parse_report_html(html)
                 mapping = load_mapping()
                 data_ru, missing = apply_mapping(data, mapping, return_missing=True)
+                phase = "diag"
                 diag = run_report_diagnostics(report_base)
                 await _status("Собираю отчёт (логотип и схемы)…")
+                phase = "render"
                 rendered = _render_report_template(data_ru, base_dir=report_base, use_file_url=False, diag=diag)
+                phase = "write_html"
                 html_path = save_path.with_suffix(".html")
                 html_path.write_text(rendered, encoding="utf-8")
                 _log(f"REPORT: HTML сохранён для резерва: {html_path}")
                 await _status("Формирую PDF…")
+                phase = "set_content"
                 # #region agent log
                 _debug_log("encar_report.py:before_set_content", "before set_content", {"html_len": len(rendered)}, "H3")
                 # #endregion
@@ -698,6 +710,7 @@ async def fetch_report_pdf_mapped(
                 except Exception:
                     pass
                 _log(f"REPORT: картинки в странице загружены: {imgs_ok}")
+                phase = "pdf"
                 # #region agent log
                 _debug_log("encar_report.py:before_pdf", "before page.pdf", {}, "H4")
                 # #endregion
@@ -713,22 +726,22 @@ async def fetch_report_pdf_mapped(
                 await browser.close()
     except asyncio.TimeoutError as e:
         # #region agent log
-        _debug_log("encar_report.py:except", "TimeoutError", {"type": "TimeoutError", "msg": str(e)}, "H1")
+        _debug_log("encar_report.py:except", "TimeoutError", {"type": "TimeoutError", "msg": str(e), "phase": phase}, "H1")
         # #endregion
-        _log(f"REPORT_MAPPED: таймаут (asyncio) {e}")
-        _log(f"REPORT_MAPPED: FAIL type=TimeoutError msg={e}")
+        _log(f"REPORT_MAPPED: таймаут (asyncio) phase={phase} {e}")
+        _log(f"REPORT_MAPPED: FAIL phase={phase} type=TimeoutError msg={e}")
         return (False, None, False)
     except Exception as e:
         import traceback
         # #region agent log
-        _debug_log("encar_report.py:except", "Exception", {"type": type(e).__name__, "msg": str(e)}, "H2,H3,H4,H5")
+        _debug_log("encar_report.py:except", "Exception", {"type": type(e).__name__, "msg": str(e), "phase": phase}, "H2,H3,H4,H5")
         # #endregion
         is_timeout = "timeout" in type(e).__name__.lower() or "timeout" in str(e).lower()
         if is_timeout:
-            _log(f"REPORT_MAPPED: таймаут (playwright/сеть) {e}")
+            _log(f"REPORT_MAPPED: таймаут (playwright/сеть) phase={phase} {e}")
         else:
-            _log(f"REPORT_MAPPED: ошибка {e}")
-        _log(f"REPORT_MAPPED: FAIL type={type(e).__name__} msg={e}")
+            _log(f"REPORT_MAPPED: ошибка phase={phase} {e}")
+        _log(f"REPORT_MAPPED: FAIL phase={phase} type={type(e).__name__} msg={e}")
         traceback.print_exc()
         return (False, None, False)
 
