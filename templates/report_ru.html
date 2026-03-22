@@ -160,7 +160,7 @@
 {%- set j = codes_join|string -%}
 {%- set c = j|lower -%}
 {%- if '교환' in j or '교체' in j or 'замен' in c or ' scratch' in c or c.startswith('scratch') or ' damage' in c or 'dent' in c or c == 'x' or c.startswith('x,') or c.endswith(', x') or ', x,' in c %}value-zone-bad
-{%- elif 'покрас' in c or 'окрас' in c or '도장' in j or '도색' in j or ' metal' in c or c == 'p' or c.startswith('p,') or ', p,' in c or c.endswith(', p') %}value-zone-warn
+{%- elif 'покрас' in c or 'окрас' in c or 'сварк' in c or '도장' in j or '도색' in j or ' metal' in c or c == 'p' or c.startswith('p,') or ', p,' in c or c.endswith(', p') %}value-zone-warn
 {%- elif c == '' or c == '—' or 'оригинал' in c or '정상' in j %}value-zone-ok
 {%- endif -%}
 {%- endmacro %}
@@ -270,7 +270,6 @@
         <div class="report-tab-panel{% if ns.first == 'diagram' %} is-visible{% endif %}" id="panel-diagram" role="tabpanel">
           <div class="section-inner section-diagram">
             <h3>Схема состояния кузова</h3>
-            <p class="diagram-legend-caption">Обозначения на схемах: на виде внешних панелей метка «окрас», на виде силовой структуры — «сварка/кузовные работы» (один код METAL на Encar, разные значки).</p>
             <ul class="diagram-legend">
               {% for item in (diagram_legend_items or []) %}
               {% if item.src %}
@@ -328,7 +327,29 @@
               <thead><tr><th>Элемент</th><th>Состояние</th></tr></thead>
               <tbody>
               {% for z in diagram.zones %}
-              {% set joined = z.codes | join(', ') %}
+              {% set od = diagram_outer_data or {} %}
+              {% set ind = diagram_inner_data or {} %}
+              {% set nsj = namespace(parts=[]) %}
+              {% for ru in z.codes %}
+                {% set i = loop.index0 %}
+                {% set raw = z.codes_raw[i] if z.codes_raw is defined and i < (z.codes_raw|length) else none %}
+                {% if raw == 'METAL' %}
+                  {% set ou = z.zone_id and od.get(z.zone_id) %}
+                  {% set inn = z.zone_id and ind.get(z.zone_id) %}
+                  {% if ou and inn %}
+                    {% set nsj.parts = nsj.parts + ['Окрас внешней панели · сварка или окрас несущей части'] %}
+                  {% elif ou %}
+                    {% set nsj.parts = nsj.parts + ['Окрас внешней панели'] %}
+                  {% elif inn %}
+                    {% set nsj.parts = nsj.parts + ['Сварка или окрас несущей части'] %}
+                  {% else %}
+                    {% set nsj.parts = nsj.parts + [ru] %}
+                  {% endif %}
+                {% else %}
+                  {% set nsj.parts = nsj.parts + [ru] %}
+                {% endif %}
+              {% endfor %}
+              {% set joined = nsj.parts | join(', ') %}
               {% set zc = zone_codes_class(joined) %}
               <tr><td>{{ z.zone }}</td><td{% if zc %} class="{{ zc }}"{% endif %}>{{ joined }}</td></tr>
               {% endfor %}

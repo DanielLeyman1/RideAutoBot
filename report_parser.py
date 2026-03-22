@@ -259,6 +259,7 @@ def apply_mapping(data: dict, mapping: dict, return_missing: bool = False):
             "zone": zone_ru,
             "zone_id": zone_id,
             "codes": codes_ru,
+            "codes_raw": list(codes),
             "code": codes[0] if codes else "",
         })
     for c in data.get("diagram", {}).get("legend_used", []):
