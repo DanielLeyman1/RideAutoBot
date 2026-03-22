@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import html
 import logging
 import os
 import sys
@@ -19,7 +20,6 @@ ADMIN_ID = int(os.environ.get("TELEGRAM_ADMIN_ID", "377261863"))
 STORAGE_DIR = Path("pdf_storage")
 REPORTS_DIR = Path(os.environ.get("REPORTS_DIR", "reports"))
 DATA_DIR = Path(__file__).resolve().parent / "data"
-# Публичный URL для ссылок /r/<token> (nginx проксирует на этот хост). Пустая строка в env отключает выдачу ссылки.
 BASE_URL = os.environ.get("REPORT_BASE_URL", "https://www.wrideauto.ru").rstrip("/")
 # Порт Flask для /r/<token>. По умолчанию 9090 — чтобы не пересекаться с API каталога на 8080.
 REPORT_SERVER_PORT = int(os.environ.get("REPORT_SERVER_PORT", "9090"))
@@ -40,6 +40,17 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def _report_progress_html(carid: str, step: str) -> str:
+    """Карточка прогресса для Telegram (HTML)."""
+    cid = html.escape(str(carid))
+    st = html.escape(step)
+    return (
+        "🚗 <b>Сбор отчёта Encar</b>\n"
+        f"<code>{cid}</code>\n\n"
+        f"▸ <i>{st}</i>"
+    )
 
 
 def _run_report_http_thread() -> None:
@@ -81,11 +92,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(NON_ADMIN_MESSAGE)
         return
     await update.message.reply_text(
-        "Привет! Можешь:\n"
-        "• Отправить PDF — сохраню и дам ID для поста.\n"
-        "• Написать ID машины или ссылку Encar — сформирую отчёт и дам ссылку для объявления (HTML, ссылка 7 дней).\n"
-        "• /myid — твой Telegram ID.\n"
-        "• /report_diag — диагностика логотипа и схем."
+        "👋 <b>Привет.</b> Режим администратора <b>Ride Auto</b>.\n\n"
+        "<b>Быстрые действия</b>\n"
+        "• PDF-файл → сохраню и пришлю <code>ID</code> для поста.\n"
+        "• <code>carid</code> или ссылка Encar → соберу отчёт и публичную ссылку "
+        "(HTML, действует <b>7 дней</b>).\n\n"
+        "<b>Команды</b>\n"
+        "/myid — твой Telegram ID\n"
+        "/report_diag — логотип и схемы в шаблоне",
+        parse_mode="HTML",
     )
 
 
@@ -160,11 +175,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     bot_dir = Path(__file__).resolve().parent
-    status = await update.message.reply_text(f"Запрашиваю отчёт Encar для carid={carid}…")
+    status = await update.message.reply_text(
+        _report_progress_html(carid, "Старт: подключаюсь к Encar…"),
+        parse_mode="HTML",
+    )
 
     async def report_status(msg: str):
         try:
-            await status.edit_text(f"{msg}\n\ncarid={carid}")
+            await status.edit_text(_report_progress_html(carid, msg), parse_mode="HTML")
         except Exception:
             pass
 
@@ -176,15 +194,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[{time.strftime('%H:%M:%S')}] [BOT] fetch_report_pdf ok={ok} html_path={html_path}", flush=True)
         if not ok:
             await status.edit_text(
-                "Не удалось сформировать отчёт (таймаут, страница Encar недоступна или ошибка).\n"
-                "Проверьте логи бота. Команда /report_diag — диагностика логотипа и схем."
+                "⚠️ <b>Не получилось собрать отчёт</b>\n"
+                f"<code>{html.escape(str(carid))}</code>\n\n"
+                "Таймаут, Encar недоступен или ошибка парсера.\n"
+                "Смотри логи бота; /report_diag — проверка шаблона.",
+                parse_mode="HTML",
             )
             return
 
         if not BASE_URL:
             await status.edit_text(
-                "Отчёт сформирован, но REPORT_BASE_URL не задан — ссылку для объявлений выдать нельзя. "
-                "Задайте переменную окружения REPORT_BASE_URL (например https://ваш-домен.com)."
+                "📎 <b>Отчёт готов</b>, но <code>REPORT_BASE_URL</code> пустой — "
+                "публичную ссылку выдать нельзя.\n"
+                "Задай переменную окружения (например <code>https://www.wrideauto.ru</code>).",
+                parse_mode="HTML",
             )
             if html_path and html_path.exists():
                 with open(html_path, "rb") as f:
@@ -197,10 +220,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report_url = f"{BASE_URL}/r/{token}"
         _inject_og_url(report_file, report_url)
 
-        await status.edit_text(f"Отчёт по carid={carid} готов. Ссылка действительна 7 дней.")
-        await update.message.reply_text(f"Посмотреть отчёт об истории авто: {report_url}")
+        await status.edit_text(
+            "✅ <b>Отчёт готов</b>\n"
+            f"<code>{html.escape(str(carid))}</code>\n\n"
+            "Публичная ссылка действует <b>7 дней</b>.",
+            parse_mode="HTML",
+        )
+        safe_url = html.escape(report_url, quote=True)
+        await update.message.reply_text(
+            f"🔗 <a href=\"{safe_url}\">Открыть отчёт в браузере</a>",
+            parse_mode="HTML",
+            disable_web_page_preview=False,
+        )
     except Exception as e:
-        await status.edit_text(f"Ошибка: {e}")
+        await status.edit_text(
+            f"❌ <b>Ошибка</b>\n<code>{html.escape(str(e))}</code>",
+            parse_mode="HTML",
+        )
 
 
 def main():

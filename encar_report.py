@@ -685,7 +685,7 @@ async def fetch_report_pdf_mapped(
     phase = "start"
     try:
         _log("REPORT_MAPPED: старт")
-        await _status("Открываю страницу Encar…")
+        await _status("Загружаю страницу диагностики Encar…")
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
@@ -733,7 +733,7 @@ async def fetch_report_pdf_mapped(
                         pass
                 await page.wait_for_timeout(3000)
                 _log("REPORT_MAPPED: страница загружена")
-                await _status("Извлекаю данные, формирую отчёт на русском…")
+                await _status("Парсинг таблиц и перевод на русский…")
                 phase = "parse"
                 html = await page.content()
                 data = parse_report_html(html)
@@ -741,14 +741,14 @@ async def fetch_report_pdf_mapped(
                 data_ru, missing = apply_mapping(data, mapping, return_missing=True)
                 phase = "diag"
                 diag = run_report_diagnostics(report_base)
-                await _status("Собираю отчёт (логотип и схемы)…")
+                await _status("Сборка HTML: логотип, схемы кузова…")
                 phase = "render"
                 rendered = _render_report_template(data_ru, base_dir=report_base, use_file_url=False, diag=diag)
                 phase = "write_html"
                 html_path = save_path.with_suffix(".html")
                 html_path.write_text(rendered, encoding="utf-8")
                 _log(f"REPORT: HTML сохранён для резерва: {html_path}")
-                await _status("Формирую PDF…")
+                await _status("Финальный рендер и сохранение PDF (резерв)…")
                 phase = "set_content"
                 # #region agent log
                 _debug_log("encar_report.py:before_set_content", "before set_content", {"html_len": len(rendered)}, "H3")
@@ -818,7 +818,7 @@ async def fetch_report_pdf(
         if attempt > 0:
             _log("REPORT: повторная попытка…")
             if on_status:
-                await on_status("Повторная попытка…")
+                await on_status("Повторная попытка загрузки…")
         result = await fetch_report_pdf_mapped(carid, save_path, on_status=on_status, base_dir=base_dir)
         if result[0]:
             return result
