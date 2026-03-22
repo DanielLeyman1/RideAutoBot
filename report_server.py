@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 HTTP-сервер для раздачи отчётов по короткой ссылке /r/<token>.
-Запускается в отдельном потоке из bot.py.
+Также /<token> — если reverse proxy (Caddy) отрезает префикс /r/ и шлёт только токен.
 """
 import base64
 import os
+import re
 from pathlib import Path
 
-from flask import Flask, send_file
+from flask import Flask, abort, send_file
 
 from report_cache import get_report_path
 
@@ -41,14 +42,21 @@ def init_report_server(reports_dir: Path, data_dir: Path, template_dir: Path) ->
     _EXPIRED_HTML = _build_expired_html(template_dir, data_dir)
 
 
-@app.route("/r/<token>")
-def serve_report(token: str):
+def _looks_like_report_token(token: str) -> bool:
+    """Как у secrets.token_urlsafe: без точек и слэшей, чтобы не перехватывать favicon.ico и т.п."""
+    if not token or len(token) < 8 or len(token) > 128:
+        return False
+    if "." in token or "/" in token or "\\" in token:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]+", token))
+
+
+def _deliver_report(token: str):
     if _DATA_DIR is None or _REPORTS_DIR is None:
         return _EXPIRED_HTML or "Отчёт устарел.", 404, {"Content-Type": "text/html; charset=utf-8"}
     cached_path, expired = get_report_path(token, _DATA_DIR)
     if expired or cached_path is None:
         return _EXPIRED_HTML or "Отчёт устарел.", 200, {"Content-Type": "text/html; charset=utf-8"}
-    # Файл на диске всегда <token>.html (см. report_cache.save_report)
     html_file = _REPORTS_DIR / f"{token}.html"
     path_to_send = html_file if html_file.exists() else cached_path
     if not path_to_send.exists():
@@ -59,6 +67,19 @@ def serve_report(token: str):
         as_attachment=False,
         download_name=None,
     )
+
+
+@app.route("/r/<token>")
+def serve_report(token: str):
+    return _deliver_report(token)
+
+
+@app.route("/<token>")
+def serve_report_root(token: str):
+    """Caddy/nginx иногда проксируют путь без /r/ — только токен в корне."""
+    if not _looks_like_report_token(token):
+        abort(404)
+    return _deliver_report(token)
 
 
 def run_server(port: int = None, reports_dir: Path = None, data_dir: Path = None, template_dir: Path = None) -> None:
