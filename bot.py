@@ -264,7 +264,14 @@ def main():
     print(f"Сервер отчётов: http://0.0.0.0:{REPORT_SERVER_PORT}/r/<token>", flush=True)
 
     try:
-        TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8596627705:AAFHUS6_b3jqhBm1NyLGsEARFhxHL0PJ4Go")
+        TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+        if not TOKEN:
+            print(
+                "Ошибка: не задан TELEGRAM_BOT_TOKEN. Укажите токен от @BotFather в переменных окружения "
+                "(на сервере: export TELEGRAM_BOT_TOKEN='...' или Environment= в systemd).",
+                flush=True,
+            )
+            sys.exit(1)
         app = ApplicationBuilder().token(TOKEN).build()
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("myid", cmd_myid))
