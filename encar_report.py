@@ -31,8 +31,8 @@ def _debug_log(location: str, message: str, data: dict | None = None, hypothesis
 _REPORT_PROXY_HOST_DEFAULT = "http://geo.floppydata.com:10080"
 _PROJECT_PRIMARY_DEFAULT = {
     "server": _REPORT_PROXY_HOST_DEFAULT,
-    "username": "UciwZyfTPlvUn4OS",
-    "password": "FDsAIHONGvLKdUlN",
+    "username": "J0ujsUxFURqYjxvq",
+    "password": "uAY7gu3lhqz7M4TI",
 }
 _USER_RESERVE_DEFAULT = {
     "server": _REPORT_PROXY_HOST_DEFAULT,
