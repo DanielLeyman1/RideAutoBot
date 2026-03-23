@@ -21,6 +21,15 @@ def _text(el) -> str:
     return _strip(el.get_text() if hasattr(el, "get_text") else str(el))
 
 
+def _table_trs(table) -> list:
+    rows: list = []
+    for tb in table.find_all("tbody", recursive=False):
+        rows.extend(tb.find_all("tr", recursive=False))
+    if rows:
+        return rows
+    return table.find_all("tr", recursive=False)
+
+
 def _parse_basic_table(soup, out: dict) -> None:
     selectors = (
         ".inspec_carinfo table.ckst",
@@ -32,7 +41,7 @@ def _parse_basic_table(soup, out: dict) -> None:
         table_basic = soup.select_one(sel)
         if not table_basic:
             continue
-        rows = table_basic.select("tbody tr")
+        rows = _table_trs(table_basic)
         if not rows:
             continue
         for tr in rows:
@@ -49,6 +58,27 @@ def _parse_basic_table(soup, out: dict) -> None:
                     i += 1
         if out["basic"]:
             return
+    # Новая вёрстка Encar: таблица без ckst, но с «차명» + «차대번호» (две пары полей в строке)
+    for table in soup.find_all("table"):
+        raw = table.get_text()
+        if "차명" not in raw or "차대번호" not in raw:
+            continue
+        if "주행거리 계기상태" in raw or "자기진단" in raw:
+            continue
+        for tr in _table_trs(table):
+            cells = tr.find_all(["th", "td"])
+            if len(cells) >= 4:
+                for i in (0, 2):
+                    if i + 1 < len(cells):
+                        k, v = _text(cells[i]), _text(cells[i + 1])
+                        if k and len(k) < 100 and not k.startswith("http"):
+                            out["basic"][k] = v
+            elif len(cells) >= 2 and cells[0].name == "th":
+                k, v = _text(cells[0]), _text(cells[1])
+                if k:
+                    out["basic"][k] = v
+        if len(out["basic"]) >= 3:
+            return
 
 
 def _find_summary_table(soup):
@@ -59,36 +89,76 @@ def _find_summary_table(soup):
         classes = " ".join(table.get("class") or []).lower()
         if "tbl" in classes and "total" in classes:
             return table
-    return None
+    # Эвристика по тексту (классы могли исчезнуть)
+    markers = (
+        "주행거리 계기상태",
+        "주행거리",
+        "튜닝",
+        "리콜",
+        "특별이력",
+        "용도변경",
+        "주요옵션",
+        "배출가스",
+    )
+    best = None
+    best_sc = 0
+    for table in soup.find_all("table"):
+        raw = table.get_text()
+        if "자기진단" in raw and "오일누유" in raw:
+            continue
+        sc = sum(1 for m in markers if m in raw)
+        if sc >= 3 and sc > best_sc:
+            best_sc = sc
+            best = table
+    return best
 
 
 def _parse_summary_table(soup, out: dict) -> None:
     table_total = _find_summary_table(soup)
     if not table_total:
         return
-    for tr in table_total.select("tbody tr"):
-        th = tr.select_one("th[scope=row]") or tr.select_one("th")
-        if not th:
+    for tr in _table_trs(table_total):
+        cells = tr.find_all(["th", "td"])
+        if not cells:
             continue
-        label = _text(th)
-        status_el = tr.select_one(".txt_state.on") or tr.select_one(".txt_state")
-        status = _text(status_el) if status_el else ""
-        detail_el = tr.select_one(".txt_detail")
-        value = _text(detail_el) if detail_el else ""
-        value_actual = ""
-        if detail_el:
-            on_el = detail_el.select_one(".txt_state.on")
-            if on_el:
-                value_actual = _text(on_el)
-        if not value and status:
-            for td in tr.select("td.td_left, td"):
-                t = _text(td)
-                if t and t != status and not t.startswith("span"):
-                    value = t
-                    break
-        out["summary"].append(
-            {"label": label, "status": status, "value": value, "value_actual": value_actual}
-        )
+        first_txt = _text(cells[0])
+        if first_txt in ("자동차 종합상태 표", "성능기록부", "항목/해당부품"):
+            continue
+        th = tr.select_one("th[scope=row]") or tr.select_one("th")
+        if th:
+            label = _text(th)
+            status_el = tr.select_one(".txt_state.on") or tr.select_one(".txt_state")
+            status = _text(status_el) if status_el else ""
+            detail_el = tr.select_one(".txt_detail")
+            value = _text(detail_el) if detail_el else ""
+            value_actual = ""
+            if detail_el:
+                on_el = detail_el.select_one(".txt_state.on")
+                if on_el:
+                    value_actual = _text(on_el)
+            if not value and status:
+                for td in tr.select("td.td_left, td"):
+                    t = _text(td)
+                    if t and t != status and not t.startswith("span"):
+                        value = t
+                        break
+            if label:
+                out["summary"].append(
+                    {
+                        "label": label,
+                        "status": status,
+                        "value": value,
+                        "value_actual": value_actual,
+                    }
+                )
+            continue
+        if len(cells) >= 2 and all(c.name == "td" for c in cells[:2]):
+            label = _text(cells[0])
+            rest = " ".join(_text(c) for c in cells[1:])
+            if label and len(label) < 80:
+                out["summary"].append(
+                    {"label": label, "status": "", "value": rest, "value_actual": ""}
+                )
 
 
 def _find_repair_table(soup):
@@ -103,6 +173,10 @@ def _find_repair_table(soup):
         t = sec.select_one("table")
         if t:
             return t
+    for table in soup.find_all("table"):
+        raw = table.get_text()
+        if "사고이력" in raw and ("단순수리" in raw or "가격조사" in raw):
+            return table
     return None
 
 
@@ -110,15 +184,22 @@ def _parse_repair_table(soup, out: dict) -> None:
     section_repair = _find_repair_table(soup)
     if not section_repair:
         return
-    for tr in section_repair.select("tbody tr"):
+    for tr in _table_trs(section_repair):
         th = tr.select_one("th[scope=row]") or tr.select_one("th")
-        if not th:
+        tds = tr.find_all("td")
+        label = ""
+        if th:
+            label = _text(th)
+        elif tds:
+            label = _text(tds[0])
+        if not label:
             continue
-        label = _text(th)
         if "자세히" in label or "uibtn" in label:
             label = re.sub(r"\s*자세히보기\s*", "", label)
         status_el = tr.select_one(".txt_state.on") or tr.select_one(".txt_state")
         value = _text(status_el) if status_el else ""
+        if not value and len(tds) >= 2:
+            value = _text(tds[-1])
         out["repair"].append({"label": label, "value": value})
 
 
@@ -130,6 +211,12 @@ def _find_detail_table(soup):
         classes = " ".join(table.get("class") or []).lower()
         if "detail" in classes and "tbl" in classes:
             return table
+    for table in soup.find_all("table"):
+        raw = table.get_text()
+        if "오일누유" in raw and "작동상태" in raw and (
+            "자기진단" in raw or "원동기" in raw
+        ):
+            return table
     return None
 
 
@@ -138,12 +225,16 @@ def _parse_detail_table(soup, out: dict) -> None:
     if not table_detail:
         return
     current_device = ""
-    for tr in table_detail.select("tbody tr"):
+    skip_hdr = ("자동차 기타정보 표", "주요장치", "항목/해당부품", "상태")
+    for tr in _table_trs(table_detail):
         ths = tr.select("th[scope=row]") or tr.select("th")
+        tds = tr.find_all("td")
         status_el = tr.select_one(".txt_state.on") or tr.select_one(".txt_state")
         status = _text(status_el) if status_el else ""
         if ths:
             first = _text(ths[0])
+            if first in skip_hdr:
+                continue
             if first and first not in (
                 "양호",
                 "불량",
@@ -160,7 +251,17 @@ def _parse_detail_table(soup, out: dict) -> None:
                     item = _text(ths[1])
                 else:
                     item = first
+                if not status and len(tds) >= 1:
+                    status = _text(tds[-1])
                 out["detail"].append({"device": current_device, "item": item, "status": status})
+        elif len(tds) >= 3:
+            d, it, st = _text(tds[0]), _text(tds[1]), _text(tds[2])
+            if d in skip_hdr or it in skip_hdr:
+                continue
+            if d and d not in ("양호", "불량", "없음"):
+                current_device = d
+            if it:
+                out["detail"].append({"device": current_device, "item": it, "status": st or status})
 
 
 def _performance_check_anchor(html: str) -> int:
