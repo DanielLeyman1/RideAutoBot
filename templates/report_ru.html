@@ -122,7 +122,18 @@
       font-weight: 500;
       box-shadow: var(--shadow-sm);
     }
-    .diagram-legend-icon { width: 24px; height: 24px; flex-shrink: 0; object-fit: contain; }
+    .diagram-legend-indicator {
+      width: 14px; height: 14px; border-radius: 9999px; flex-shrink: 0;
+      border: 1px solid rgba(17, 24, 39, 0.18);
+      box-shadow: inset 0 0 0 2px rgba(255,255,255,0.5);
+    }
+    .diagram-legend-indicator.tone-bad { background: #dc2626; }
+    .diagram-legend-indicator.tone-warn { background: #d97706; }
+    .diagram-legend-indicator.tone-good { background: #16a34a; }
+    .diagram-marker-dot { stroke: rgba(17, 24, 39, 0.35); stroke-width: 1.2; }
+    .diagram-marker-dot.tone-bad { fill: #dc2626; }
+    .diagram-marker-dot.tone-warn { fill: #d97706; }
+    .diagram-marker-dot.tone-good { fill: #16a34a; }
     .diagram-images { display: flex; flex-wrap: wrap; gap: var(--space-6); margin-bottom: 1rem; }
     .diagram-images figure { margin: 0; text-align: center; }
     .diagram-figure-wrap { position: relative; display: inline-block; max-width: 100%; }
@@ -271,9 +282,7 @@
             <h3>Схема состояния кузова</h3>
             <ul class="diagram-legend">
               {% for item in (diagram_legend_items or []) %}
-              {% if item.src %}
-              <li><img src="{{ item.src }}" alt="" class="diagram-legend-icon" /> {{ item.label }}</li>
-              {% endif %}
+              <li><span class="diagram-legend-indicator tone-{{ item.tone or 'warn' }}"></span>{{ item.label }}</li>
               {% endfor %}
             </ul>
             <div class="diagram-images">
@@ -287,10 +296,11 @@
                   <div class="diagram-overlay" aria-hidden="true">
                     <svg viewBox="{{ viewbox_outer }}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
                       {% for z in diagram.zones %}
-                      {% set outer_icons = diagram_outer_code_icons or diagram_code_icons or {} %}
-                      {% if z.zone_id and z.code and outer_data.get(z.zone_id) and outer_icons.get(z.code) %}
+                      {% set styles = diagram_code_styles or {} %}
+                      {% set style = styles.get(z.code) if z.code else none %}
+                      {% if z.zone_id and z.code and outer_data.get(z.zone_id) and style %}
                       {% set o = outer_data[z.zone_id] %}
-                      <image x="{{ o.cx - icon_size / 2 }}" y="{{ o.cy - icon_size / 2 }}" width="{{ icon_size }}" height="{{ icon_size }}" href="{{ outer_icons[z.code] }}" />
+                      <circle class="diagram-marker-dot tone-{{ style.tone or 'warn' }}" cx="{{ o.cx }}" cy="{{ o.cy }}" r="{{ (icon_size / 3) | round(1) }}" />
                       {% endif %}
                       {% endfor %}
                     </svg>
@@ -308,10 +318,11 @@
                   <div class="diagram-overlay" aria-hidden="true">
                     <svg viewBox="{{ viewbox_inner }}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
                       {% for z in diagram.zones %}
-                      {% set inner_icons = diagram_inner_code_icons or diagram_code_icons or {} %}
-                      {% if z.zone_id and z.code and inner_data.get(z.zone_id) and inner_icons.get(z.code) %}
+                      {% set styles = diagram_code_styles or {} %}
+                      {% set style = styles.get(z.code) if z.code else none %}
+                      {% if z.zone_id and z.code and inner_data.get(z.zone_id) and style %}
                       {% set i = inner_data[z.zone_id] %}
-                      <image x="{{ i.cx - icon_size / 2 }}" y="{{ i.cy - icon_size / 2 }}" width="{{ icon_size }}" height="{{ icon_size }}" href="{{ inner_icons[z.code] }}" />
+                      <circle class="diagram-marker-dot tone-{{ style.tone or 'warn' }}" cx="{{ i.cx }}" cy="{{ i.cy }}" r="{{ (icon_size / 3) | round(1) }}" />
                       {% endif %}
                       {% endfor %}
                     </svg>

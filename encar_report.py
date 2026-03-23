@@ -39,6 +39,27 @@ def _report_proxy():
     }
 
 
+FALLBACK_PROXY = {
+    "server": "http://geo.floppydata.com:10080",
+    "username": "44yE6gInasmcVgGy",
+    "password": "b3z81xfZLM9YZZgZ",
+}
+
+
+def _report_proxy_candidates() -> list[dict | None]:
+    """Возвращает список вариантов прокси: основной + резервный."""
+    primary = _report_proxy()
+    if primary is None:
+        return [None]
+    out = [primary]
+    if (
+        primary.get("server") != FALLBACK_PROXY["server"]
+        or primary.get("username") != FALLBACK_PROXY["username"]
+    ):
+        out.append(dict(FALLBACK_PROXY))
+    return out
+
+
 def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -573,48 +594,27 @@ def _render_report_template(data_ru: dict, base_dir: Path | None = None, use_fil
                     diagram_inner_size = (w, h)
                 _log(f"REPORT: схема встроена ({inner_path.name})")
 
-    # Иконки для легенды и схемы (код → data URI SVG)
-    import base64 as _b64
-    diagram_code_icons = {}
-    for code, filename in DIAGRAM_CODE_ICONS.items():
-        icon_path = images_dir / filename
-        if icon_path.exists():
-            try:
-                raw = icon_path.read_bytes()
-                diagram_code_icons[code] = f"data:image/svg+xml;base64,{_b64.b64encode(raw).decode('ascii')}"
-            except Exception:
-                pass
-    diagram_outer_code_icons = dict(diagram_code_icons)
-    diagram_inner_code_icons = dict(diagram_code_icons)
-    welding_path = images_dir / "Welding.svg"
-    if "METAL" in diagram_code_icons and welding_path.exists():
-        try:
-            raw_w = welding_path.read_bytes()
-            diagram_inner_code_icons["METAL"] = (
-                f"data:image/svg+xml;base64,{_b64.b64encode(raw_w).decode('ascii')}"
-            )
-        except Exception:
-            pass
+    # Временный режим без SVG-иконок: цветовые индикаторы.
+    diagram_code_styles = {
+        "CHANGE": {"label": "Замена", "tone": "bad"},
+        "METAL": {"label": "Окрас/сварка", "tone": "warn"},
+        "CORROSION": {"label": "Коррозия", "tone": "bad"},
+        "SCRATCH": {"label": "Царапина", "tone": "warn"},
+        "DENT": {"label": "Вмятина", "tone": "warn"},
+        "DAMAGE": {"label": "Повреждение", "tone": "bad"},
+    }
     diagram_legend_items: list[dict] = []
     for code in DIAGRAM_LEGEND_ORDER:
-        if code not in diagram_code_icons:
+        style = diagram_code_styles.get(code)
+        if not style:
             continue
-        label = DIAGRAM_LEGEND_LABELS.get(code, code)
+        label = DIAGRAM_LEGEND_LABELS.get(code, style["label"])
         if code == "METAL":
-            ou = diagram_outer_code_icons.get("METAL")
-            iu = diagram_inner_code_icons.get("METAL")
-            if ou and iu and iu != ou:
-                diagram_legend_items.append({"src": ou, "label": "Окрас внешних панелей"})
-                diagram_legend_items.append({"src": iu, "label": "Сварка и окрас силовой структуры"})
-            elif ou:
-                diagram_legend_items.append({"src": ou, "label": label})
+            diagram_legend_items.append({"code": code, "tone": "warn", "label": label})
         else:
-            diagram_legend_items.append({"src": diagram_code_icons[code], "label": label})
-    data_ru["diagram_code_icons"] = diagram_code_icons
-    data_ru["diagram_outer_code_icons"] = diagram_outer_code_icons
-    data_ru["diagram_inner_code_icons"] = diagram_inner_code_icons
+            diagram_legend_items.append({"code": code, "tone": style["tone"], "label": label})
+    data_ru["diagram_code_styles"] = diagram_code_styles
     data_ru["diagram_legend_items"] = diagram_legend_items
-    data_ru["diagram_legend_labels"] = DIAGRAM_LEGEND_LABELS
     data_ru["diagram_icon_size"] = DIAGRAM_ICON_SIZE
 
     # Координаты зон: каноническое пространство из JSON (outer 600×200, inner 600×200), масштабируем под размер картинки
@@ -683,6 +683,11 @@ async def _learn_missing_after_report(missing: dict) -> None:
         _log(f"LEARNED: ошибка {e}")
 
 
+def _has_main_report_content(data: dict) -> bool:
+    """Считаем отчёт валидным, если есть не только схема, но и табличные блоки."""
+    return bool(data.get("basic")) or bool(data.get("summary")) or bool(data.get("detail"))
+
+
 async def fetch_report_pdf_mapped(
     carid: str,
     save_path: Path,
@@ -727,89 +732,118 @@ async def fetch_report_pdf_mapped(
                 ],
             )
             try:
-                proxy = _report_proxy()
-                # #region agent log
-                _debug_log("encar_report.py:before_context", "proxy", {"proxy_on": proxy is not None}, "H2")
-                # #endregion
-                if proxy:
-                    _log("REPORT_MAPPED: прокси включён")
-                context = await browser.new_context(
-                    viewport={"width": 900, "height": 1200},
-                    locale="ko-KR",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                    proxy=proxy,
-                )
-                context.set_default_navigation_timeout(TIMEOUT_MS)
-                context.set_default_timeout(TIMEOUT_MS)
-                page = await context.new_page()
-                phase = "goto"
-                # #region agent log
-                _debug_log("encar_report.py:before_goto", "before page.goto", {"url": url}, "H1")
-                # #endregion
-                await page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
-                # #region agent log
-                _debug_log("encar_report.py:after_goto", "page.goto ok", {}, "H1")
-                # #endregion
-                try:
-                    await page.wait_for_selector(".inspec_carinfo, #bodydiv", timeout=20000)
-                except Exception:
-                    pass
-                # Ждём появления таблиц отчёта (контент может подгружаться динамически)
-                for selector in ["table.tbl_total", ".inspec_carinfo table.ckst", "table.tbl_detail"]:
+                proxies = _report_proxy_candidates()
+                last_error: Exception | None = None
+                for proxy_idx, proxy in enumerate(proxies, start=1):
+                    context = None
                     try:
-                        await page.wait_for_selector(selector, timeout=10000)
-                        break
-                    except Exception:
-                        pass
-                await page.wait_for_timeout(3000)
-                _log("REPORT_MAPPED: страница загружена")
-                await _status("Парсинг таблиц и перевод на русский…")
-                phase = "parse"
-                html = await page.content()
-                data = parse_report_html(html)
-                mapping = load_mapping()
-                data_ru, missing = apply_mapping(data, mapping, return_missing=True)
-                phase = "diag"
-                diag = run_report_diagnostics(report_base)
-                await _status("Сборка HTML: логотип, схемы кузова…")
-                phase = "render"
-                rendered = _render_report_template(data_ru, base_dir=report_base, use_file_url=False, diag=diag)
-                phase = "write_html"
-                html_path = save_path.with_suffix(".html")
-                html_path.write_text(rendered, encoding="utf-8")
-                _log(f"REPORT: HTML сохранён для резерва: {html_path}")
-                await _status("Финальный рендер и сохранение PDF (резерв)…")
-                phase = "set_content"
-                # #region agent log
-                _debug_log("encar_report.py:before_set_content", "before set_content", {"html_len": len(rendered)}, "H3")
-                # #endregion
-                await page.set_content(rendered, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
-                # #region agent log
-                _debug_log("encar_report.py:after_set_content", "set_content ok", {}, "H3")
-                # #endregion
-                await page.wait_for_timeout(3000)
-                imgs_ok = False
-                try:
-                    imgs_ok = await page.evaluate("""() => {
-                        const imgs = document.querySelectorAll('img');
-                        if (!imgs.length) return false;
-                        return Array.from(imgs).every(i => i.complete && i.naturalWidth > 0);
-                    }""")
-                except Exception:
-                    pass
-                _log(f"REPORT: картинки в странице загружены: {imgs_ok}")
-                phase = "pdf"
-                # #region agent log
-                _debug_log("encar_report.py:before_pdf", "before page.pdf", {}, "H4")
-                # #endregion
-                await page.pdf(path=str(save_path), format="A4", print_background=True)
-                # #region agent log
-                _debug_log("encar_report.py:after_pdf", "page.pdf ok", {}, "H4")
-                # #endregion
-                _log("REPORT_MAPPED: готово")
-                if missing and (missing.get("labels") or missing.get("status_words")):
-                    asyncio.create_task(_learn_missing_after_report(missing))
-                return (True, html_path, imgs_ok)
+                        # #region agent log
+                        _debug_log("encar_report.py:before_context", "proxy", {"proxy_on": proxy is not None, "proxy_idx": proxy_idx}, "H2")
+                        # #endregion
+                        if proxy:
+                            _log(f"REPORT_MAPPED: прокси #{proxy_idx} {proxy.get('server')} ({proxy.get('username')})")
+                        else:
+                            _log("REPORT_MAPPED: прокси отключён")
+                        context = await browser.new_context(
+                            viewport={"width": 900, "height": 1200},
+                            locale="ko-KR",
+                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                            proxy=proxy,
+                        )
+                        context.set_default_navigation_timeout(TIMEOUT_MS)
+                        context.set_default_timeout(TIMEOUT_MS)
+                        page = await context.new_page()
+                        phase = "goto"
+                        # #region agent log
+                        _debug_log("encar_report.py:before_goto", "before page.goto", {"url": url}, "H1")
+                        # #endregion
+                        await page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+                        # #region agent log
+                        _debug_log("encar_report.py:after_goto", "page.goto ok", {}, "H1")
+                        # #endregion
+                        try:
+                            await page.wait_for_selector(".inspec_carinfo, #bodydiv", timeout=20000)
+                        except Exception:
+                            pass
+                        # Ждём появления таблиц отчёта (контент может подгружаться динамически)
+                        for selector in ["table.tbl_total", ".inspec_carinfo table.ckst", "table.tbl_detail"]:
+                            try:
+                                await page.wait_for_selector(selector, timeout=10000)
+                                break
+                            except Exception:
+                                pass
+                        await page.wait_for_timeout(2500)
+                        _log("REPORT_MAPPED: страница загружена")
+                        await _status("Парсинг таблиц и перевод на русский…")
+                        phase = "parse"
+                        mapping = load_mapping()
+                        data_ru = {}
+                        missing = {"labels": {}, "status_words": {}}
+                        # Иногда Encar дорисовывает таблицы позже; пробуем повторный парсинг перед фейлом.
+                        for parse_try in range(3):
+                            html = await page.content()
+                            data = parse_report_html(html)
+                            if _has_main_report_content(data):
+                                data_ru, missing = apply_mapping(data, mapping, return_missing=True)
+                                break
+                            _log(f"REPORT_MAPPED: неполный отчёт (только схема), повтор парсинга {parse_try + 1}/3")
+                            await page.wait_for_timeout(2500)
+                            if parse_try == 1:
+                                try:
+                                    await page.reload(wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+                                except Exception:
+                                    pass
+                        if not data_ru:
+                            raise RuntimeError("Не удалось получить таблицы отчёта (получена только схема)")
+                        phase = "diag"
+                        diag = run_report_diagnostics(report_base)
+                        await _status("Сборка HTML: логотип, схемы кузова…")
+                        phase = "render"
+                        rendered = _render_report_template(data_ru, base_dir=report_base, use_file_url=False, diag=diag)
+                        phase = "write_html"
+                        html_path = save_path.with_suffix(".html")
+                        html_path.write_text(rendered, encoding="utf-8")
+                        _log(f"REPORT: HTML сохранён для резерва: {html_path}")
+                        await _status("Финальный рендер и сохранение PDF (резерв)…")
+                        phase = "set_content"
+                        # #region agent log
+                        _debug_log("encar_report.py:before_set_content", "before set_content", {"html_len": len(rendered)}, "H3")
+                        # #endregion
+                        await page.set_content(rendered, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+                        # #region agent log
+                        _debug_log("encar_report.py:after_set_content", "set_content ok", {}, "H3")
+                        # #endregion
+                        await page.wait_for_timeout(3000)
+                        imgs_ok = False
+                        try:
+                            imgs_ok = await page.evaluate("""() => {
+                                const imgs = document.querySelectorAll('img');
+                                if (!imgs.length) return false;
+                                return Array.from(imgs).every(i => i.complete && i.naturalWidth > 0);
+                            }""")
+                        except Exception:
+                            pass
+                        _log(f"REPORT: картинки в странице загружены: {imgs_ok}")
+                        phase = "pdf"
+                        # #region agent log
+                        _debug_log("encar_report.py:before_pdf", "before page.pdf", {}, "H4")
+                        # #endregion
+                        await page.pdf(path=str(save_path), format="A4", print_background=True)
+                        # #region agent log
+                        _debug_log("encar_report.py:after_pdf", "page.pdf ok", {}, "H4")
+                        # #endregion
+                        _log("REPORT_MAPPED: готово")
+                        if missing and (missing.get("labels") or missing.get("status_words")):
+                            asyncio.create_task(_learn_missing_after_report(missing))
+                        return (True, html_path, imgs_ok)
+                    except Exception as e:
+                        last_error = e
+                        _log(f"REPORT_MAPPED: попытка с прокси #{proxy_idx} не удалась: {e}")
+                    finally:
+                        if context is not None:
+                            await context.close()
+                if last_error is not None:
+                    raise last_error
             finally:
                 await browser.close()
     except asyncio.TimeoutError as e:
