@@ -801,6 +801,32 @@ async def _best_encar_page_html(page) -> tuple[str, int]:
     return best_html, best_score
 
 
+async def _wait_until_encar_markup(page, nav_timeout_ms: int) -> None:
+    """
+    Дождаться появления разметки отчёта в любом frame.
+    Без networkidle (на Encar часто «никогда не наступает») и без цикла N_frames × M_селекторов × 6s.
+    """
+    import time as _time
+
+    budget_s = min(14.0, max(4.0, nav_timeout_ms / 6000.0))
+    t0 = _time.monotonic()
+    try:
+        await page.wait_for_selector("iframe", timeout=min(5000, nav_timeout_ms))
+    except Exception:
+        pass
+    while _time.monotonic() - t0 < budget_s:
+        try:
+            _h, sc = await _best_encar_page_html(page)
+            if sc >= 5:
+                return
+        except Exception:
+            pass
+        try:
+            await page.wait_for_timeout(350)
+        except Exception:
+            break
+
+
 def _has_any_report_ru(data_ru: dict) -> bool:
     """Есть ли хоть что-то для отображения после маппинга."""
     if data_ru.get("basic"):
@@ -895,42 +921,26 @@ async def fetch_report_pdf_mapped(
                         _debug_log("encar_report.py:after_goto", "page.goto ok", {}, "H1")
                         # #endregion
                         try:
-                            await page.wait_for_load_state("load", timeout=min(45_000, NAV_TIMEOUT_MS))
+                            await page.wait_for_load_state("load", timeout=min(12_000, NAV_TIMEOUT_MS))
                         except Exception:
                             pass
                         try:
-                            await page.wait_for_selector(".inspec_carinfo, #bodydiv", timeout=min(25_000, NAV_TIMEOUT_MS))
+                            await page.wait_for_selector(
+                                ".inspec_carinfo, #bodydiv, table.tbl_total, table.ckst",
+                                timeout=min(12_000, NAV_TIMEOUT_MS),
+                            )
                         except Exception:
                             pass
-                        # Отчёт часто в iframe — ждём кадр и таблицы внутри любого frame
-                        try:
-                            await page.wait_for_selector("iframe", timeout=min(15_000, NAV_TIMEOUT_MS))
-                        except Exception:
-                            pass
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=18_000)
-                        except Exception:
-                            pass
-                        for fr in list(page.frames):
-                            for selector in (
-                                "table.tbl_total",
-                                "table.ckst",
-                                ".inspec_carinfo table",
-                                "table.tbl_detail",
-                            ):
-                                try:
-                                    await fr.wait_for_selector(selector, timeout=6000)
-                                except Exception:
-                                    continue
+                        await _wait_until_encar_markup(page, NAV_TIMEOUT_MS)
                         try:
                             await page.evaluate(
                                 "() => { window.scrollTo(0, document.body.scrollHeight); }"
                             )
-                            await page.wait_for_timeout(900)
+                            await page.wait_for_timeout(500)
                             await page.evaluate("() => { window.scrollTo(0, 0); }")
                         except Exception:
                             pass
-                        await page.wait_for_timeout(2800)
+                        await page.wait_for_timeout(1600)
                         _log("REPORT_MAPPED: страница загружена")
                         await _status("Парсинг таблиц и перевод на русский…")
                         phase = "parse"
@@ -954,7 +964,7 @@ async def fetch_report_pdf_mapped(
                             _log(
                                 f"REPORT_MAPPED: нет основных таблиц (basic/summary/detail), попытка {parse_try + 1}/5"
                             )
-                            await page.wait_for_timeout(3500)
+                            await page.wait_for_timeout(2200)
                             if parse_try == 2:
                                 try:
                                     await page.reload(
@@ -1024,9 +1034,15 @@ async def fetch_report_pdf_mapped(
                     except Exception as e:
                         last_error = e
                         _log(f"REPORT_MAPPED: попытка с прокси #{proxy_idx} не удалась: {e}")
+                        en = type(e).__name__
+                        if en == "TargetClosedError" or "TargetClosed" in en or "has been closed" in str(e).lower():
+                            raise last_error
                     finally:
                         if context is not None:
-                            await context.close()
+                            try:
+                                await context.close()
+                            except Exception:
+                                pass
                 if last_error is not None:
                     raise last_error
             finally:
