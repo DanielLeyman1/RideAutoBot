@@ -120,6 +120,14 @@ def _report_step_timeout_ms() -> int:
     return max(30_000, int(os.environ.get("REPORT_STEP_TIMEOUT_MS", "180000")))
 
 
+def _report_enable_pdf() -> bool:
+    """
+    Нужен ли локальный рендер PDF через Playwright.
+    По умолчанию выключено: бот всё равно отдает публичную HTML-ссылку.
+    """
+    return os.environ.get("REPORT_ENABLE_PDF", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -1134,6 +1142,12 @@ async def fetch_report_pdf_mapped(
                         html_path = save_path.with_suffix(".html")
                         html_path.write_text(rendered, encoding="utf-8")
                         _log(f"REPORT: HTML сохранён для резерва: {html_path}")
+                        if not _report_enable_pdf():
+                            _log("REPORT: PDF выключен (REPORT_ENABLE_PDF=0), отдаю HTML-ссылку")
+                            _log("REPORT_MAPPED: готово")
+                            if missing and (missing.get("labels") or missing.get("status_words")):
+                                asyncio.create_task(_learn_missing_after_report(missing))
+                            return (True, html_path, True)
                         await _status("Финальный рендер и сохранение PDF (резерв)…")
                         phase = "set_content"
                         # #region agent log
@@ -1158,12 +1172,24 @@ async def fetch_report_pdf_mapped(
                         # #region agent log
                         _debug_log("encar_report.py:before_pdf", "before page.pdf", {}, "H4")
                         # #endregion
-                        await page.pdf(
-                            path=str(save_path),
-                            format="A4",
-                            print_background=True,
-                            timeout=STEP_TIMEOUT_MS,
-                        )
+                        try:
+                            await page.pdf(
+                                path=str(save_path),
+                                format="A4",
+                                print_background=True,
+                                timeout=STEP_TIMEOUT_MS,
+                            )
+                        except TypeError as e:
+                            # Совместимость со старыми версиями Playwright,
+                            # где у page.pdf() нет аргумента timeout.
+                            if "unexpected keyword argument 'timeout'" not in str(e):
+                                raise
+                            _log("REPORT: page.pdf() без timeout (совместимость Playwright)")
+                            await page.pdf(
+                                path=str(save_path),
+                                format="A4",
+                                print_background=True,
+                            )
                         # #region agent log
                         _debug_log("encar_report.py:after_pdf", "page.pdf ok", {}, "H4")
                         # #endregion
